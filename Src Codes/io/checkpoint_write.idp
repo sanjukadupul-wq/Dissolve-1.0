@@ -1,0 +1,123 @@
+// io/checkpoint_write.idp
+// Periodically writes a full-state checkpoint (every field + the bookkeeping
+// scalars needed to resume correctly), so a crash or freeze mid-run doesn't
+// lose all progress. Overwrites the same files each time -- only the LATEST
+// checkpoint is kept, not a full history, so disk use stays bounded.
+//
+// Correctness: inside the time loop, each MPI rank only holds ITS OWN
+// PARTITION of e.g. phi[] -- a naive rank-0-only save would silently write
+// just rank 0's fragment. This reuses the exact gather pattern
+// numerics/timestep_solver.idp's redistancing already validated as exact
+// (restrict() + mpiAllReduce sum onto the replicated MeshBackup, confirmed
+// ~1e-12 error via DEBUG_REDIST_STAGES on 2026-08-14/15): weight each rank's
+// contribution by the partition-of-unity (A.D), scatter via restrict()'s
+// index map onto the full/replicated mesh, then sum-reduce.
+//
+// Written at the SAME point in the loop as io/write_results.idp's VTK save,
+// i.e. using the "as of time t" field values BEFORE this iteration's solves
+// -- so the checkpoint captures the same instant a VTK snapshot would.
+
+IFMACRO(!idpCheckpointWrite)
+macro idpCheckpointWrite 1//
+
+if (t >= nextCheckpointTime)
+{
+  if (mpirank == 0) print("Writing checkpoint at t=" + t + "h...");
+
+  fespace SpaceBackup(MeshBackup, Pk);
+  SpaceBackup ckptFieldG, ckptFieldReduce;
+  int[int] ckptRst = restrict(SpaceP1, SpaceBackup, newToOldGlobal);
+
+  phiTemp = phi; phiTemp[] .*= A.D;
+  ckptFieldG = 0;
+  for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+  ckptFieldReduce = 0;
+  mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+  if (mpirank == 0) savesol(checkpointDir + "/checkpoint_phi.sol", MeshBackup, ckptFieldReduce);
+
+  phiTemp = Zn; phiTemp[] .*= A.D;
+  ckptFieldG = 0;
+  for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+  ckptFieldReduce = 0;
+  mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+  if (mpirank == 0) savesol(checkpointDir + "/checkpoint_Zn.sol", MeshBackup, ckptFieldReduce);
+
+  phiTemp = F; phiTemp[] .*= A.D;
+  ckptFieldG = 0;
+  for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+  ckptFieldReduce = 0;
+  mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+  if (mpirank == 0) savesol(checkpointDir + "/checkpoint_F.sol", MeshBackup, ckptFieldReduce);
+
+  phiTemp = Cl; phiTemp[] .*= A.D;
+  ckptFieldG = 0;
+  for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+  ckptFieldReduce = 0;
+  mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+  if (mpirank == 0) savesol(checkpointDir + "/checkpoint_Cl.sol", MeshBackup, ckptFieldReduce);
+
+  phiTemp = OH; phiTemp[] .*= A.D;
+  ckptFieldG = 0;
+  for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+  ckptFieldReduce = 0;
+  mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+  if (mpirank == 0) savesol(checkpointDir + "/checkpoint_OH.sol", MeshBackup, ckptFieldReduce);
+
+  phiTemp = O2; phiTemp[] .*= A.D;
+  ckptFieldG = 0;
+  for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+  ckptFieldReduce = 0;
+  mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+  if (mpirank == 0) savesol(checkpointDir + "/checkpoint_O2.sol", MeshBackup, ckptFieldReduce);
+
+  if (enableFlowSolve)
+  {
+    phiTemp = ux; phiTemp[] .*= A.D;
+    ckptFieldG = 0;
+    for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+    ckptFieldReduce = 0;
+    mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+    if (mpirank == 0) savesol(checkpointDir + "/checkpoint_ux.sol", MeshBackup, ckptFieldReduce);
+
+    phiTemp = uy; phiTemp[] .*= A.D;
+    ckptFieldG = 0;
+    for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+    ckptFieldReduce = 0;
+    mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+    if (mpirank == 0) savesol(checkpointDir + "/checkpoint_uy.sol", MeshBackup, ckptFieldReduce);
+
+    phiTemp = uz; phiTemp[] .*= A.D;
+    ckptFieldG = 0;
+    for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+    ckptFieldReduce = 0;
+    mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+    if (mpirank == 0) savesol(checkpointDir + "/checkpoint_ux_p.sol", MeshBackup, ckptFieldReduce);
+
+    phiTemp = p; phiTemp[] .*= A.D;
+    ckptFieldG = 0;
+    for[i, v : ckptRst] ckptFieldG[][v] = phiTemp[][i];
+    ckptFieldReduce = 0;
+    mpiAllReduce(ckptFieldG[], ckptFieldReduce[], mpiCommWorld, mpiSUM);
+    if (mpirank == 0) savesol(checkpointDir + "/checkpoint_press.sol", MeshBackup, ckptFieldReduce);
+  }
+
+  if (mpirank == 0)
+  {
+    // Fixed order, one value per line, no key labels -- simplest possible
+    // format to parse back reliably. Order MUST match checkpoint_read.idp.
+    ofstream ckpt(checkpointDir + "/checkpoint_state.txt");
+    ckpt << t << endl;
+    ckpt << count << endl;
+    ckpt << dt << endl;
+    ckpt << nextRedistanceTime << endl;
+    ckpt << nextVtkSaveTime << endl;
+    ckpt << (nextCheckpointTime + checkpointEachTime) << endl;
+    ckpt << initialVolume << endl;
+    ckpt << prevScaffoldSize << endl;
+    print("Checkpoint written to " + checkpointDir + "/checkpoint_*.sol  (t=" + t + "h, count=" + count + ")");
+  }
+
+  nextCheckpointTime += checkpointEachTime;
+}
+
+ENDIFMACRO//

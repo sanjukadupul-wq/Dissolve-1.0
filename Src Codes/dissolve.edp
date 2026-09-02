@@ -1,0 +1,197 @@
+// dissolve.edp
+// Entry point for Dissolve — a reaction-diffusion + level-set solver for
+// degradation of Zn-alloy scaffolds/implants, driven by ORR surface kinetics.
+//
+// Pipeline: load dependencies -> read settings -> build mesh -> declare
+// fields -> assemble governing equations -> solve the Stefan problem for the
+// initial interface velocity -> set initial state -> step forward in time.
+
+// 1. Third-party FreeFEM modules and command-line argument parsing
+include "config/dependencies.idp"
+
+// 2. Simulation, material, geometry, and solver settings
+include "config/settings.idp"
+
+// 3. Shared macros and helper functions
+include "utils/helpers.idp"
+
+if (mpirank == 0)
+{
+  printHeader();
+  print("Time step (dt): " + dt);
+  print("Adaptive dt: " + adaptiveTimeStep + "  (dtMax=" + dtMax + "h, growth=" + dtGrowthFactor + "x, threshold=" + dtStabilityThreshold + "%)");
+  print("Output file: " + resultsFilename);
+
+  // Refuse to silently overwrite VTK output from a previous run. -vtk_prefix
+  // lets each run point at its own path, but nothing enforced that it actually
+  // does -- reusing a path (or forgetting the flag and falling back to the
+  // "output/output" default) mid-writes an existing series with no warning.
+  // Found worth guarding 2026-08-17 while starting a multi-geometry TPMS
+  // porosity study, where each mesh needs its own untouched output folder.
+  // -overwrite_vtk 1 bypasses this for deliberate re-runs.
+  if (emitVtkOutput && !getARGV("-overwrite_vtk", 0))
+  {
+    // FreeFEM's parallel savevtk appends "_<mpisize>" to the .pvd filename
+    // (confirmed: -np 16 writes output_16.pvd, matching this project's
+    // existing convention everywhere else) -- checking bare "name.pvd" here
+    // would never find it and the guard would silently never fire.
+    string pvdCheck = vtkFilePrefix + "_" + mpisize + ".pvd";
+    if (fileExists(pvdCheck))
+    {
+      print("");
+      print("REFUSING TO START: " + pvdCheck + " already exists.");
+      print("  -vtk_prefix points at output that's already there -- starting");
+      print("  would silently overwrite/interleave with an existing VTK series.");
+      print("  Pass a distinct -vtk_prefix, or -overwrite_vtk 1 to proceed anyway.");
+      exit(1);
+    }
+  }
+}
+
+// 4. Build and partition the computational domain
+include "domain/mesh_setup.idp"
+
+// 5. Declare finite-element spaces and simulation fields
+include "state/fields.idp"
+
+// 6. Assemble the weak (variational) forms of the governing PDEs
+include "physics/governing_equations.idp"
+
+// 7. Solve for the initial interface velocity (Stefan condition)
+include "physics/interface_kinetics.idp"
+
+// 8. Set initial conditions
+include "state/initial_state.idp"
+
+// 8b. Override with a checkpoint, if resuming after a crash/freeze instead
+//     of a fresh t=0 start (-restart_from <dir>; no-op otherwise)
+include "io/checkpoint_read.idp"
+
+// Local matrices/vectors reused across time steps
+matrix Loc;
+real[int] B(SpaceP1.ndof);
+real[int] nsRhs(SpaceVector.ndof);
+
+// Wall-clock start, for the elapsed/ETA display below -- these runs go out
+// to 8766h (12 months) of simulated time, so knowing actual real-world
+// elapsed time (not just simulated hours) matters for a job that can run
+// for days.
+real simStartTime = mpiWtime();
+
+// ---------------------------------------------------------------------------
+// Main time-stepping loop
+// ---------------------------------------------------------------------------
+for (real t = restartT; t < simDuration; t += dt)
+{
+  // Carry forward the previous step's solution
+  phiold = phi;
+  Fold   = F;
+  Znold  = Zn;
+  Clold  = Cl;
+  OHold  = OH;
+  O2old  = O2;
+  if (count) // skip on the very first step
+    [upx, upy, upz, pp] = [ux, uy, uz, p];
+
+  // -- Track remaining scaffold volume for this step -------------------
+  loc = 0;
+  IFMACRO(intN)
+    loc = intN(MeshNoOverlap)(phi > 0);
+  ENDIFMACRO
+  IFMACRO(!intN)
+    loc = int3d(MeshNoOverlap)(phi > 0);
+  ENDIFMACRO
+
+  glob = 0;
+  mpiAllReduce(loc, glob, mpiCommWorld, mpiSUM);
+  scaffoldSize = glob;
+
+  if (t == 0)
+  {
+    initialVolume = scaffoldSize;
+    if (mpirank == 0) print("Initial volume (initialVolume): " + initialVolume);
+  }
+
+  if (mpirank == 0)
+  {
+    real massZnLost = max(0.0, (initialVolume - scaffoldSize) * znDensity);
+    real massO2Consumed = massZnLost * 0.2447; // 2 Zn (65.38) : 1 O2 (32.0)
+
+    real pctChange = 0;
+    if (initialVolume > 1e-12)
+      pctChange = (initialVolume - scaffoldSize) / initialVolume * 100;
+
+    real wallElapsedH = (mpiWtime() - simStartTime) / 3600.0;
+
+    printDivider;
+    print("Time: " + t + "h  (" + formatDuration(t) + ")    Step: " + count
+    + "    O2 consumed (g): " + massO2Consumed)
+    print("Initial size: " + initialVolume + "    Current size: " + scaffoldSize
+    + "    % change: " + pctChange)
+    print("Wall-clock elapsed: " + formatDuration(wallElapsedH)
+    + "  (" + round2(wallElapsedH) + "h since job start)")
+    printDivider;
+  }
+
+  if (initialVolume > 1e-12 && ((initialVolume - scaffoldSize) / initialVolume) >= 0.98) // fully degraded
+  {
+    print("Scaffold is fully degraded - stopping simulation.");
+    break;
+  }
+
+  // -- I/O for this step -------------------------------------------------
+  include "io/write_results.idp"
+  include "io/export_geometry.idp"
+  include "io/checkpoint_write.idp"
+
+  // -- Advance the interface and field solutions --------------------------
+  include "physics/interface_velocity.idp"
+  include "numerics/timestep_solver.idp"
+  include "numerics/mesh_refinement.idp"
+
+  // ============================================================================
+  // ADAPTIVE TIME STEP: grow dt while the step we just took was "quiet"
+  // ============================================================================
+  // scaffoldSize above is the volume BEFORE this step; compare against the
+  // volume AFTER this step's solve to get this step's actual change. Grow dt
+  // (never shrink) while that change stays under the stability threshold.
+  if (adaptiveTimeStep)
+  {
+    loc = 0;
+    IFMACRO(intN)
+      loc = intN(MeshNoOverlap)(phi > 0);
+    ENDIFMACRO
+    IFMACRO(!intN)
+      loc = int3d(MeshNoOverlap)(phi > 0);
+    ENDIFMACRO
+    glob = 0;
+    mpiAllReduce(loc, glob, mpiCommWorld, mpiSUM);
+    real scaffoldSizeAfter = glob;
+
+    real stepChangePct = 0;
+    if (initialVolume > 1e-12)
+      stepChangePct = abs(scaffoldSizeAfter - scaffoldSize) / initialVolume * 100.0;
+
+    if (mpirank == 0)
+    {
+      if (stepChangePct < dtStabilityThreshold && dt < dtMax)
+      {
+        real dtOld = dt;
+        dt = min(dt * dtGrowthFactor, dtMax);
+        print("Adaptive dt: step change " + stepChangePct + "% < threshold " + dtStabilityThreshold + "% -> dt " + dtOld + "h -> " + dt + "h")
+      }
+      else
+      {
+        print("Adaptive dt: step change " + stepChangePct + "% -- holding dt at " + dt + "h")
+      }
+    }
+    broadcast(processor(0), dt);
+  }
+
+  count += 1;
+
+  mpiBarrier(mpiCommWorld); // keep all ranks in step before the next iteration
+}
+
+// Persist the final state of the model
+include "io/write_final_state.idp"

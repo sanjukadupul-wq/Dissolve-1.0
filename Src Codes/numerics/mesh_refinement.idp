@@ -1,0 +1,88 @@
+// numerics/mesh_refinement.idp
+// Optional adaptive mesh refinement: re-tetrahedralizes around the moving
+// interface once the scaffold volume has changed by more than the
+// configured threshold since the last refinement.
+
+IFMACRO(!idpMeshRefinement)
+macro idpMeshRefinement 1//
+
+if (adaptMeshRuntime)
+{
+  if (mpirank == 0)
+  {
+    scaffoldSize = intN(Mesh)(scaffold);
+    scaffoldChangePct = abs(scaffoldSize - prevScaffoldSize) / prevScaffoldSize * 100;
+
+    if (scaffoldChangePct > refineThresholdPct)
+    {
+      print("Refining mesh...")
+
+      if (reuseRefinedMesh)
+      {
+        Mesh = change(Mesh, fregion=0);
+      }
+      else
+      {
+        Mesh = initialMesh;
+        phi = phi;
+      }
+
+      mm = 0.;
+      mm[] = mshmet(Mesh, (phi>0),
+                    normalization=1,
+                    aniso=0,
+                    nbregul=1,
+                    hmin=1e-2,
+                    hmax=0.2,
+                    err=mshmetTolerance);
+
+      Mesh = tetgreconstruction(Mesh,
+                                switch="raAQ",
+                                sizeofvolume=mm*mm*mm/6.);
+
+      real c = mpisize / real(Mesh.nt);
+      Mesh = change(Mesh, fregion=min(mpisize-1, int(nuTriangle*c)));
+
+      print("New DOF is: " + SpaceP1.ndof)
+
+      changed = 1;
+
+      phi = phi;
+      distance(Mesh, phi, phiTemp[]);
+      phi = phiTemp;
+    }
+  }
+
+  broadcast(processor(0), changed);
+
+  if (changed)
+  {
+    broadcast(processor(0), Mesh);
+
+    phi = phi;
+    broadcast(processor(0), phi[]);
+
+    F = F;
+    Zn = Zn;
+    Cl = Cl;
+    OH = OH;
+    O2 = O2;
+
+    normgradphi = normgradphi;
+
+    DeZn = DeZn;
+    DeCl = DeCl;
+    DeOH = DeOH;
+    DeO2 = DeO2;
+
+    v = v;
+
+    scaffold = (phi > 0);
+
+    prevScaffoldSize = int3d(Mesh)(scaffold);
+
+    changed = 0;
+  }
+}
+
+ENDIFMACRO//

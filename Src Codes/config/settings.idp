@@ -1,0 +1,254 @@
+// config/settings.idp
+// Every tunable simulation, material, geometry, and solver setting.
+// All values are overridable from the command line via getARGV(-flag, default).
+
+IFMACRO(!idpSettings)
+macro idpSettings 1//
+
+verbosity = 0;
+
+bool enableZnEquation = getARGV("-enable_zn", 1);
+
+real PENALTY = 1e8;
+
+// --- Output ------------------------------------------------------------
+string resultsFilename = getARGV("-results_file", "output/result.txt");
+string vtkFilePrefix = getARGV("-vtk_prefix", "output/output");
+bool emitVtkOutput = getARGV("-emit_vtk", 0);
+bool dumpInitialMesh = getARGV("-dump_initial_mesh", 0);
+bool dumpPartitionedMesh = getARGV("-dump_partitioned_mesh", 0);
+real saveScaleFactor = getARGV("-save_scale_factor", 1.0);
+bool normalizeByArea = getARGV("-normalize_by_area", 0);
+bool dumpFinalState = getARGV("-dump_final_state", 1);
+
+// --- Checkpoint / restart (survive a crash or freeze mid-run) --------------
+// -restart_from <dir>: resume from a checkpoint written by a previous run
+// into that directory, instead of the normal t=0 cold start. Empty (default)
+// = cold start, unaffected. See io/checkpoint_write.idp / checkpoint_read.idp.
+string restartFrom = getARGV("-restart_from", "");
+bool doRestart = (restartFrom != "");
+real checkpointEachTime = getARGV("-checkpoint_each_time", 24.0);
+// Defaults to the same directory as -results_file, same derivation as
+// io/write_results.idp's resultsFolder -- duplicated here (not shared) because
+// settings.idp runs before write_results.idp is ever included.
+string checkpointDir = getARGV("-checkpoint_dir", "");
+if (checkpointDir == "")
+{
+  if (resultsFilename.rfind("/") >= 0)
+    checkpointDir = resultsFilename(0:resultsFilename.rfind("/"));
+  else
+    checkpointDir = "output";
+}
+
+// --- Mesh refinement -----------------------------------------------------
+bool adaptInitialMesh = getARGV("-adapt_initial_mesh", 0);
+bool adaptMeshRuntime = getARGV("-adapt_mesh_runtime", 0);
+bool reuseRefinedMesh = getARGV("-reuse_refined_mesh", 0);
+real refineThresholdPct = getARGV("-refine_threshold_pct", 5.0);
+
+bool enableRedistancing = getARGV("-enable_redistance", 1);
+
+// --- Fluid flow ----------------------------------------------------------
+bool enableFlowSolve = getARGV("-enable_flow", 0);
+bool enableFullNavierStokes = getARGV("-enable_full_ns", 1);
+bool exportFlowField = getARGV("-export_flow_field", 1);
+int flowSolveInterval = getARGV("-flow_solve_interval", 10);
+
+// --- Species / equations to solve ----------------------------------------
+bool enableFilmEquation = getARGV("-enable_film", 1);
+bool enableClEquation = getARGV("-enable_cl", 1);
+bool enableOHEquation = getARGV("-enable_oh", 1);
+bool enableO2Equation = getARGV("-enable_o2", 1);
+bool enableLevelSet = getARGV("-enable_levelset", 1);
+
+// --- Domain / mesh import --------------------------------------------------
+bool loadMeshFromFile = getARGV("-load_mesh", 1);
+string inputMeshPath = getARGV("-input_mesh", "mesh/sphere.mesh");
+
+int scaffoldRegionTag = getARGV("-tag_scaffold", 1);
+int mediumRegionTag = getARGV("-tag_medium", 2);
+int WallTag = getARGV("-tag_wall", 3);
+int InletTag = getARGV("-tag_inlet", 4);
+int OutletTag = getARGV("-tag_outlet", 5);
+
+real L = getARGV("-domain_length", 20.);
+real scaffoldSizeX  = getARGV("-scaffold_size_x", 13.);
+real scaffoldSizeY  = getARGV("-scaffold_size_y", 13.);
+real scaffoldSizeZ  = getARGV("-scaffold_size_z", 4.);
+int targetMeshSize = getARGV("-target_mesh_size", 32);
+real mshmetTolerance = getARGV("-mshmet_tolerance", 1e-2);
+real meshHMin = getARGV("-mesh_h_min", 4e-2);
+real meshHMax = getARGV("-mesh_h_max", 0.8);
+
+// --- Time stepping (hours) ------------------------------------------------
+real dt = getARGV("-dt_hours", 1.0);
+
+real saveIntervalHours = getARGV("-save_interval", dt);
+real saveRatio = saveIntervalHours / dt;
+if (saveRatio < 1.0) saveRatio = 1.0;
+int saveIntervalSteps = saveRatio;
+real simDuration = getARGV("-sim_duration", 672.0);
+simDuration += dt;
+real redistanceInterval = getARGV("-redistance_interval", 1.0);
+
+// Adaptive time-stepping: off by default (dtMax defaults to the starting dt,
+// which is a no-op). When -adaptive_dt 1, dt starts at -dt_hours and grows
+// by -dt_growth_factor after any step whose scaffold-volume change (as a
+// percent of initialVolume) is below -dt_stability_threshold, capped at -time_step_max.
+// dt never shrinks back down once grown (see dissolve.edp).
+bool adaptiveTimeStep = getARGV("-adaptive_dt", 0);
+real dtMax = getARGV("-time_step_max", dt);
+real dtGrowthFactor = getARGV("-dt_growth_factor", 1.5);
+real dtStabilityThreshold = getARGV("-dt_stability_threshold", 0.03);
+
+// VTK save cadence (hours of simulated time, not step count -- see
+// io/write_results.idp). Previously hardcoded to "every 168 steps", which
+// only equaled 168 hours because dt was always fixed at 1h; with adaptive
+// dt now available, that check no longer means anything.
+real vtkSaveEachTime = getARGV("-save_vtk_each_time", 168.0);
+
+bool exportGeometryMesh = getARGV("-export_geometry", 0);
+real exportGeometryEachTime = getARGV("-export_geometry_each", 1.);
+int exportGeometryEach = exportGeometryEachTime / dt;
+bool exportVolume = getARGV("-export_geometry_volume", 1);
+bool exportSurface = getARGV("-export_geometry_surface", 1);
+
+// --- Corrosion-product film (dimensionless) --------------------------------
+real tau = getARGV("-film_tortuosity", 2.00);
+real eps = getARGV("-film_porosity", 0.25);
+real del = getARGV("-film_constrictivity", 1.);
+
+// --- Reaction kinetics (1/hour and mm^3/(g.hour)) --------------------------
+// Renamed from k1/k2 to kf/kd (film FORMATION rate, film DEGRADATION rate)
+// to match the naming used in the paper figures. -k_f/-k_d are the current
+// flags; -k1/-k2 are no longer accepted.
+real kf = getARGV("-k_f", 125.);
+real kd = getARGV("-k_d", 40.);
+
+// --- Material densities (g/mm^3) --------------------------------------------
+real znDensity = getARGV("-rho_zn", 0.00714);
+real filmDensity = getARGV("-rho_film", 0.003998);
+real filmCapacityScale = getARGV("-film_capacity_scale", 1.);
+real filmCapacity = filmDensity * (1 - eps) * filmCapacityScale;
+
+real znMolarConc = getARGV("-zn_molar_conc", 1.09e-4);  // mol/mm^3
+// rhoZnSolid was aliased to znMolarConc (mol/mm^3) instead of znDensity (g/mm^3) --
+// a units bug: wherever "solid Zn density" is combined with znBoundaryConc/Zn (both
+// g/mm^3, see below), it needs znDensity, not the molar quantity. znDensity itself
+// was defined above but never referenced anywhere until this fix (2026-08-14) --
+// see state/fields.idp's velocityDenom and state/initial_state.idp's calculateAlpha call.
+real rhoZnSolid = znDensity;
+real znBoundaryConc = getARGV("-zn_boundary_conc", 1.00e-5);        // g/mm^3
+
+// --- Diffusion coefficients (mm^2/hour) -------------------------------------
+real diffZn = getARGV("-diff_zn", 3.38);
+real diffCl = getARGV("-diff_cl", 9.7);
+real diffOH = getARGV("-diff_oh", 25.45);
+real diffO2 = getARGV("-diff_o2", 10.8);
+
+// --- Initial species concentrations (g/mm^3) --------------------------------
+real cl0 = getARGV("-cl0", 5.043e-6);
+real oh0 = getARGV("-oh0", 2.51e-7);
+real o2Initial = getARGV("-o2_initial", 3.5e-9);
+
+// --- Oxygen reduction reaction (ORR) kinetics (1/hour) ----------------------
+real kORR = getARGV("-k_orr", 0.015);
+int useORR = getARGV("-use_orr", 1);
+
+// O2 under-relaxation, applied in numerics/timestep_solver.idp as
+//   O2 <- omega*O2solved + (1-omega)*O2old
+// This is an exponential moving average, so its continuous-time lag is
+//   tau = -dt / ln(1 - omega)
+// A FIXED omega therefore makes tau proportional to dt -- i.e. the physical
+// smoothing timescale silently changes when you change the timestep, which
+// is why dt=1h and dt=4h gave 5.03% vs 2.20% mass loss at 672h on the same
+// mesh with the same parameters (found 2026-08-14). timestep_solver.idp now
+// holds tau FIXED instead, calibrating it from this reference pair and
+// rescaling omega for whatever dt is actually in use:
+//   omega(dt) = 1 - (1 - omegaRef)^(dt/refDt)
+// At dt == o2RelaxRefDt this returns omegaRef exactly, so the existing
+// dt=1h dataset remains bit-identical.
+real o2RelaxOmega = getARGV("-o2_relax_omega", 0.3);
+real o2RelaxRefDt = getARGV("-o2_relax_ref_dt", 1.0);
+// Escape hatch: set 0 to restore the old dt-dependent behaviour (for
+// reproducing pre-fix runs), 1 (default) for the dt-consistent scaling.
+bool o2RelaxScaleWithDt = getARGV("-o2_relax_scale_dt", 1);
+
+// Velocity-extension scheme for the interface-velocity finite differences
+// (physics/interface_velocity.idp).
+//   0 = LEGACY: probe at a fixed distance h from THE NODE
+//               (dir = -h*n, second probe at -2h*n).
+//   1 = interface-relative: probe at h and 2h beyond THE INTERFACE
+//               (dir = -(phi+h)*n, dir2 = -(phi+2h)*n).
+// phi is a signed distance function, so a node sits exactly |phi| from the
+// interface -- offsetting by phi first is what makes every node in the band
+// sample the same physical location relative to the surface, i.e. a real
+// velocity extension. Under LEGACY, a node at phi=+0.9 with h=0.002 probes a
+// point still 0.898 INSIDE the scaffold, where DeO2's (phi<=0) factor zeroes
+// it -> vO2Diff=0 -> v=0. That left the interface velocity essentially
+// undefined everywhere except within h of the surface, which is why the
+// measured interface barely moved at any h (tested 0.002 - 3.0mm, 2026-08-14).
+// Default stays 0 so existing runs are unchanged until this is validated.
+int velExtension = getARGV("-vel_extension", 0);
+
+// Diagnostic: drop the Zn-transport branch from v = max(vZn, vO2) so that
+// v = vO2 alone. See physics/interface_velocity.idp -- isolates whether a
+// near-zero vZn is what vetoes O2-driven dissolution. 1 = unchanged physics.
+int useVZn = getARGV("-use_vzn", 1);
+
+// FreeFEM point-location mode used while probing fields at x+dir / x+dir2 in
+// physics/interface_velocity.idp. 0 = fast local search (legacy; can silently
+// return 0 when the probe lands far from the node's own element), 1 = robust
+// search. Matters once -vel_extension 1 makes probe offsets ~mm rather than
+// the legacy 0.002mm.
+int probeSearchMethod = getARGV("-search_method", 0);
+
+// Diagnostic: force the interface velocity to a known uniform value in the
+// band (see physics/interface_velocity.idp). Used to verify the level-set
+// advection actually moves the interface at the rate v specifies.
+// 0 = disabled (normal physics).
+real forceV = getARGV("-force_v", 0.0);
+
+// Width of the regularized delta used for interface-surface averages in
+// physics/interface_velocity.idp. Must be >= local element size to be
+// resolvable. -1 => use the mesh's own hmin.
+real deltaEps = getARGV("-delta_eps", -1.0);
+
+// Restore the pre-2026-08-15 (incorrect) sign on vO2Diff, which made the
+// O2 diffusion-limited velocity positive and therefore clamped to zero by
+// min(...,0) -- freezing the interface. For A/B comparison only.
+int legacyVO2DiffSign = getARGV("-legacy_vo2diff_sign", 0);
+
+// Enable the per-step interface probe diagnostics in
+// physics/interface_velocity.idp (O2/phi/DeO2/F sampled AT the probe point).
+// Costs extra field evaluations + integrals every step, so off by default --
+// calibration runs hundreds of evaluations and does not need them.
+int debugProbe = getARGV("-debug_probe", 0);
+
+real stefanAlpha = getARGV("-stefan_alpha", 0.);
+
+// --- Fluid flow parameters (mm/hour and g/(mm.hour)) ------------------------
+real inflowX = getARGV("-inflow_x", 36.0);
+real inflowY = getARGV("-inflow_y", 0.0);
+real inflowZ = getARGV("-inflow_z", 0.0);
+real nu = getARGV("-kinematic_viscosity", 3.607);
+
+func Pk = P1;
+func PkVector = [P2, P2, P2, P1];
+
+// --- Linear/nonlinear solver configuration ----------------------------------
+string petscAParams = "-pc_type bjacobi ";
+
+string[int] names(2);
+names[0] = "velocity";
+names[1] = "pressure";
+
+string petscNsParams = "-ksp_monitor -ksp_type fgmres -ksp_converged_reason "
+                + "-pc_type fieldsplit -pc_fieldsplit_type schur "
+                + "-fieldsplit_velocity_pc_type gamg "
+                + "-fieldsplit_pressure_ksp_max_it 5 "
+                + "-fieldsplit_pressure_pc_type jacobi "
+                + "-fieldsplit_velocity_ksp_type preonly "
+                + "-pc_fieldsplit_schur_fact_type full";
+
+ENDIFMACRO//

@@ -1,0 +1,78 @@
+// io/checkpoint_read.idp
+// Restores full state from a checkpoint written by io/checkpoint_write.idp,
+// so a run can resume after a crash/freeze instead of restarting from t=0.
+//
+// Included from dissolve.edp AFTER state/initial_state.idp's normal
+// cold-start setup runs -- everything mesh-structural there (h, matrix
+// assembly via set(A,...)/set(NS,...), etc) still needs to happen regardless;
+// only the actual field VALUES and a handful of bookkeeping scalars get
+// overridden here.
+//
+// The .sol files hold the field on the REPLICATED MeshBackup (see
+// checkpoint_write.idp). Reading it back and interpolating onto the current
+// partitioned Mesh/SpaceP1 is the same direction and mechanism as
+// redistancing's own `phi = phiReduce;` projection -- Phase 0d confirmed
+// that projection introduces no meaningful error (|grad phi| stable to
+// +0.017% over 336h of REPEATED use there; a restart only pays this cost
+// ONCE).
+//
+// IMPORTANT: restart with the SAME mesh file, SAME -np (MPI rank count), and
+// SAME -dt_hours as the original run. The checkpoint holds field values on
+// this specific mesh/partition; nothing here re-partitions or re-meshes.
+
+IFMACRO(!idpCheckpointRead)
+macro idpCheckpointRead 1//
+
+if (doRestart)
+{
+  if (mpirank == 0) print("RESTARTING from checkpoint: " + restartFrom);
+
+  fespace SpaceBackup(MeshBackup, Pk);
+  SpaceBackup ckptFieldG;
+  int[int] ckptRst = restrict(SpaceP1, SpaceBackup, newToOldGlobal);
+
+  ckptFieldG[] = readsol(restartFrom + "/checkpoint_phi.sol");
+  phi = ckptFieldG;
+  ckptFieldG[] = readsol(restartFrom + "/checkpoint_Zn.sol");
+  Zn = ckptFieldG;
+  ckptFieldG[] = readsol(restartFrom + "/checkpoint_F.sol");
+  F = ckptFieldG;
+  ckptFieldG[] = readsol(restartFrom + "/checkpoint_Cl.sol");
+  Cl = ckptFieldG;
+  ckptFieldG[] = readsol(restartFrom + "/checkpoint_OH.sol");
+  OH = ckptFieldG;
+  ckptFieldG[] = readsol(restartFrom + "/checkpoint_O2.sol");
+  O2 = ckptFieldG;
+  O2old = O2;
+
+  if (enableFlowSolve)
+  {
+    ckptFieldG[] = readsol(restartFrom + "/checkpoint_ux.sol");
+    ux = ckptFieldG;
+    ckptFieldG[] = readsol(restartFrom + "/checkpoint_uy.sol");
+    uy = ckptFieldG;
+    ckptFieldG[] = readsol(restartFrom + "/checkpoint_ux_p.sol");
+    uz = ckptFieldG;
+    ckptFieldG[] = readsol(restartFrom + "/checkpoint_press.sol");
+    p = ckptFieldG;
+  }
+
+  // Fixed order, one value per line -- MUST match checkpoint_write.idp.
+  {
+    ifstream ckptIn(restartFrom + "/checkpoint_state.txt");
+    ckptIn >> restartT;
+    ckptIn >> count;
+    ckptIn >> dt;
+    ckptIn >> nextRedistanceTime;
+    ckptIn >> nextVtkSaveTime;
+    ckptIn >> nextCheckpointTime;
+    ckptIn >> initialVolume;
+    ckptIn >> prevScaffoldSize;
+  }
+
+  if (mpirank == 0)
+    print("Restart state: t=" + restartT + "h  count=" + count + "  dt=" + dt
+          + "h  initialVolume=" + initialVolume + "  (resuming from here, not t=0)");
+}
+
+ENDIFMACRO//

@@ -1,0 +1,262 @@
+// physics/interface_velocity.idp
+// Computes the moving-interface (level-set) velocity for the current time
+// step: reaction-limited at t=0, then the slower of diffusion-limited (Zn,
+// Stefan) and reaction/diffusion-limited (O2, ORR) thereafter.
+
+IFMACRO(!idpInterfaceVelocity)
+macro idpInterfaceVelocity 1//
+
+if (mpirank==0) { print("Computing interface shrinkage velocity...") }
+
+normgradphi = sqrt(grad(phi)'*grad(phi) + 1e-6);
+xphi = dx(phi);
+yphi = dy(phi);
+zphi = dz(phi);
+
+// Probe offsets. velExtension=0 reproduces the legacy fixed-distance-from-node
+// probe EXACTLY (dir=-h*n, dir2=-2h*n, matching the old `x+2*dirx`).
+// velExtension=1 measures both offsets from the INTERFACE instead, exploiting
+// phi being a signed distance: a node sits |phi| from the surface, so offsets
+// of (phi+h) and (phi+2h) put every band node's probes at the same physical
+// depth h and 2h into the medium. See config/settings.idp for why the legacy
+// form leaves v undefined away from the surface.
+real velExt = velExtension;   // 1.0 or 0.0
+dirx = -(velExt*phi + h) * xphi / normgradphi;
+diry = -(velExt*phi + h) * yphi / normgradphi;
+dirz = -(velExt*phi + h) * zphi / normgradphi;
+dir2x = -(velExt*phi + 2.0*h) * xphi / normgradphi;
+dir2y = -(velExt*phi + 2.0*h) * yphi / normgradphi;
+dir2z = -(velExt*phi + 2.0*h) * zphi / normgradphi;
+
+DeZn = diffZn * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau);
+DeCl = diffCl * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * (phi <= 0);
+DeOH = diffOH * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * (phi <= 0);
+DeO2 = diffO2 * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * (phi <= 0);
+if (t == 0)
+{
+  // Reaction-limited initialization: use the reaction velocity at t=0
+  // instead of the (undefined) Stefan/diffusion-limited velocity.
+  vO2 = -2.0 * kORR * O2(x+dirx, y+diry, z+dirz) / znMolarConc;
+  v = vO2;
+  if(mpirank==0 && x==0 && y==0) { cout << "DEBUG: reaction-limited init at t=0" << endl; }
+}
+else
+{
+  // searchMethod controls FreeFEM's point location for interpolating at
+  // arbitrary coordinates. Mode 0 is a fast LOCAL search that can fail --
+  // returning 0 -- when the target is far from the starting element. That is
+  // harmless for the legacy probe (h=0.002mm never leaves the element) but
+  // breaks interface-relative probing, where offsets reach ~1mm / many
+  // elements: most nodes would silently get O2(...)=0 on BOTH probes, hence
+  // vO2Diff=0, leaving v nonzero only near the surface. Suspected cause of
+  // the "v large at a few nodes, ~0 across the band" pattern (2026-08-14).
+  // -search_method 1 uses the robust search during probing instead.
+  searchMethod = probeSearchMethod;
+
+  // Zn: diffusion-limited (Stefan)
+  vZn = - (Zn(x+dirx, y+diry, z+dirz) - Zn(x+dir2x, y+dir2y, z+dir2z))
+        * DeZn(x+dirx, y+diry, z+dirz)
+        * velocityDenom
+        / h;
+  vZn = min(vZn, 0.0);
+
+  // O2: reaction-limited (kinetics). SpaceP1 field, not `real` -- must be
+  // assigned via the same per-node Vh mechanism as vZn above, or this
+  // silently becomes one arbitrary broadcast scalar (see fields.idp).
+  vO2React = -2.0 * kORR * O2(x+dirx, y+diry, z+dirz) / znMolarConc;
+
+  // O2: diffusion-limited (Stefan approximation for O2 transport).
+  //
+  // SIGN: opposite to vZn above, because the two species have opposite
+  // gradient directions at the interface.
+  //   Zn  is HIGHEST at the surface (pinned at znBoundaryConc) and DECREASES outward
+  //       => (Zn_p1 - Zn_p2) > 0, so vZn's leading minus gives v < 0.
+  //   O2  is LOWEST at the surface (consumed by ORR) and INCREASES outward
+  //       => (O2_p1 - O2_p2) < 0, so the SAME leading minus gives v > 0,
+  //          which min(...,0) then clamps to exactly zero.
+  // This formula was evidently copied from vZn without flipping that sign, so
+  // vO2Diff was identically 0 -> vO2 = max(vO2React, 0) = 0 -> v = 0, and the
+  // interface could not move at all after the t=0 branch. Confirmed 2026-08-15
+  // by direct probe instrumentation: dO2_probe = -1.19e-10 (correct magnitude,
+  // negative), giving vO2Diff = +4.7e-4 before clamping.
+  // -legacy_vo2diff_sign 1 restores the old (broken) sign for comparison.
+  real vO2DiffSign = legacyVO2DiffSign ? -2.0 : 2.0;
+  vO2Diff = vO2DiffSign * (O2(x+dirx, y+diry, z+dirz) - O2(x+dir2x, y+dir2y, z+dir2z))
+                 * DeO2(x+dirx, y+diry, z+dirz)
+                 / (znMolarConc * h);
+  vO2Diff = min(vO2Diff, 0.0);
+
+  // O2 rate is set by the slower of reaction vs. diffusion. Velocities are
+  // negative, so max() picks whichever is smaller in magnitude.
+  vO2 = max(vO2React, vO2Diff);
+
+  searchMethod = 1;
+
+  // DIAGNOSTIC SWITCH (-use_vzn 0): drop the Zn-transport branch entirely so
+  // v = vO2. Isolates whether vZn is what pins v to ~0: max() selects the
+  // SLOWER (least-negative) branch, so a vZn that sits near zero -- e.g.
+  // because Zn has diffused away and left almost no gradient to sample --
+  // silently vetoes the O2-driven dissolution rate no matter how large vO2 is.
+  // Default 1 = unchanged physics.
+  if (useVZn)
+    v = max(vZn, vO2);
+  else
+    v = vO2;
+
+  // DIAGNOSTIC (-force_v <negative value>): overwrite the computed velocity
+  // with a known uniform value near the interface. Separates "v is too small"
+  // from "the level-set advection is not applying v": with v forced to V0 the
+  // interface must recede |V0|*T, so dV must equal |V0|*T*Area. Any mismatch
+  // is the advection, not the physics. 0 = disabled.
+  if (forceV < 0.0)
+    v = forceV * (abs(phi) < 1.0);
+
+  {
+    // How often does each branch actually bind, within the level-set band?
+    real bandLocD = intN(Mesh)((abs(phi) < 1.0));
+    real znBindsLoc = intN(Mesh)((abs(phi) < 1.0) * (vZn > vO2));
+    real bandGlobD = 0, znBindsGlob = 0;
+    mpiAllReduce(bandLocD, bandGlobD, mpiCommWorld, mpiSUM);
+    mpiAllReduce(znBindsLoc, znBindsGlob, mpiCommWorld, mpiSUM);
+    if (mpirank == 0)
+      cout << "DEBUG_BIND t=" << t << " vZn_binds_frac="
+           << (znBindsGlob / (bandGlobD + 1e-30)) << endl;
+  }
+
+  // Tracing the kf -> F -> DeO2 -> O2 -> vO2 pathway (proposed diagnostic,
+  // 2026-08-14): global (all-rank) min/max via mpiAllReduce, not just
+  // rank 0's local partition -- this runs at -np 16 in the real sweeps.
+  real FmaxLoc = F[].max, FminLoc = F[].min;
+  real DeO2maxLoc = DeO2[].max, DeO2minLoc = DeO2[].min;
+  real FmaxGlob=0, FminGlob=0, DeO2maxGlob=0, DeO2minGlob=0;
+  mpiAllReduce(FmaxLoc, FmaxGlob, mpiCommWorld, mpiMAX);
+  mpiAllReduce(FminLoc, FminGlob, mpiCommWorld, mpiMIN);
+  mpiAllReduce(DeO2maxLoc, DeO2maxGlob, mpiCommWorld, mpiMAX);
+  mpiAllReduce(DeO2minLoc, DeO2minGlob, mpiCommWorld, mpiMIN);
+
+  real vO2maxLoc = vO2[].max, vO2minLoc = vO2[].min;
+  real vZnmaxLoc = vZn[].max, vZnminLoc = vZn[].min;
+  real vmaxLoc = v[].max, vminLoc = v[].min;
+  real vO2maxGlob=0, vO2minGlob=0, vZnmaxGlob=0, vZnminGlob=0, vmaxGlob=0, vminGlob=0;
+  mpiAllReduce(vO2maxLoc, vO2maxGlob, mpiCommWorld, mpiMAX);
+  mpiAllReduce(vO2minLoc, vO2minGlob, mpiCommWorld, mpiMIN);
+  mpiAllReduce(vZnmaxLoc, vZnmaxGlob, mpiCommWorld, mpiMAX);
+  mpiAllReduce(vZnminLoc, vZnminGlob, mpiCommWorld, mpiMIN);
+  mpiAllReduce(vmaxLoc, vmaxGlob, mpiCommWorld, mpiMAX);
+  mpiAllReduce(vminLoc, vminGlob, mpiCommWorld, mpiMIN);
+
+  // min/max are global extrema -- a single node, not representative of the
+  // interface as a whole. The quantity that actually determines mass loss
+  // is the AREA-WEIGHTED MEAN of v over the interface band (matching the
+  // shrink varf's own v*normgradphi*vp term, integrated). Checking this
+  // directly (2026-08-14) rather than assuming min/max tell the real story.
+  real bandLoc = intN(Mesh)((abs(phi) < 1.0));
+  real vBandSumLoc = intN(Mesh)(v * (abs(phi) < 1.0));
+  real bandGlob=0, vBandSumGlob=0;
+  mpiAllReduce(bandLoc, bandGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(vBandSumLoc, vBandSumGlob, mpiCommWorld, mpiSUM);
+  real vBandMean = vBandSumGlob / (bandGlob + 1e-30);
+
+  // The band above is ~633mm^3 and mostly far from the surface, so its mean is
+  // NOT what moves the interface. What matters is v at phi~0. Measured two
+  // ways: a narrow |phi|<0.05 band, and a delta-weighted surface average
+  //   <v>_S = int(v*delta(phi)) / int(delta(phi)),  delta ~ (1-tanh^2)/(2 eps)
+  // which is the quantity the level-set advection actually integrates.
+  // Delta-function width for the surface averages below. MUST be >= the local
+  // element size or the quadrature cannot resolve the spike and both surfArea
+  // and v.surfMean become garbage (coarse mesh elements are ~0.5mm, so the
+  // previous hardcoded 0.05 was 10x too narrow). Defaults to the mesh's own
+  // hmin via -delta_eps -1.
+  real epsD = (deltaEps > 0) ? deltaEps : hhh[].min;
+
+  // Direct instrumentation of the O2 probe (2026-08-15). Cross-checks put the
+  // sink, the field and the advection all in the right range, leaving the
+  // two-point gradient probe as the only place the ~5500x shortfall can come
+  // from. Measure, at the interface, exactly what the probe sees:
+  //   O2p1/O2p2 -- the two sampled values
+  //   dO2       -- their difference (should be grad*h ~ 4.8e-11 at h=0.05)
+  //   phip1     -- phi AT the first probe point; with vel_extension=1 this
+  //                must be ~ -h. If it isn't, the probe is not landing where
+  //                intended and phi is not behaving as a signed distance.
+  // Gated behind -debug_probe: these extra SpaceP1 evaluations and integrals
+  // cost real time per step, which matters once calibration runs hundreds of
+  // evaluations. Off by default.
+  if (debugProbe)
+  {
+    SpaceP1 O2p1 = O2(x+dirx, y+diry, z+dirz);
+    SpaceP1 O2p2 = O2(x+dir2x, y+dir2y, z+dir2z);
+    SpaceP1 phip1 = phi(x+dirx, y+diry, z+dirz);
+    SpaceP1 dO2f = O2p1 - O2p2;
+    // Film state AT THE PROBE POINT, which is where vO2Diff actually reads it.
+    // Domain-max F/filmCapacity and DeO2 are misleading: DeO2 keeps its full diffO2 value
+    // far from the interface (no film there), so the max never drops even when
+    // the surface is fully passivated.
+    SpaceP1 DeO2p1 = DeO2(x+dirx, y+diry, z+dirz);
+    SpaceP1 Fp1 = F(x+dirx, y+diry, z+dirz);
+    real wLoc  = intN(Mesh)((1.0 - tanh(phi/epsD)^2) / (2.0*epsD));
+    real o1Loc = intN(Mesh)(O2p1 * (1.0 - tanh(phi/epsD)^2) / (2.0*epsD));
+    real dOLoc = intN(Mesh)(dO2f * (1.0 - tanh(phi/epsD)^2) / (2.0*epsD));
+    real ppLoc = intN(Mesh)(phip1 * (1.0 - tanh(phi/epsD)^2) / (2.0*epsD));
+    real deLoc = intN(Mesh)(DeO2p1 * (1.0 - tanh(phi/epsD)^2) / (2.0*epsD));
+    real fpLoc = intN(Mesh)(Fp1 * (1.0 - tanh(phi/epsD)^2) / (2.0*epsD));
+    real wG=0, o1G=0, dOG=0, ppG=0, deG=0, fpG=0;
+    mpiAllReduce(wLoc, wG, mpiCommWorld, mpiSUM);
+    mpiAllReduce(o1Loc, o1G, mpiCommWorld, mpiSUM);
+    mpiAllReduce(dOLoc, dOG, mpiCommWorld, mpiSUM);
+    mpiAllReduce(ppLoc, ppG, mpiCommWorld, mpiSUM);
+    mpiAllReduce(deLoc, deG, mpiCommWorld, mpiSUM);
+    mpiAllReduce(fpLoc, fpG, mpiCommWorld, mpiSUM);
+    if (mpirank == 0)
+      cout << "DEBUG_PROBE t=" << t
+           << " O2_at_probe1=" << (o1G/(wG+1e-30))
+           << " dO2_probe=" << (dOG/(wG+1e-30))
+           << " phi_at_probe1=" << (ppG/(wG+1e-30))
+           << " DeO2_at_probe1=" << (deG/(wG+1e-30))
+           << " FoverFmax_at_probe1=" << (fpG/(wG+1e-30)/filmCapacity)
+           << " O2_field_min=" << O2[].min
+           << endl;
+  }
+  real narrowLoc = intN(Mesh)((abs(phi) < epsD));
+  real vNarrowLoc = intN(Mesh)(v * (abs(phi) < epsD));
+  real dWLoc = intN(Mesh)((1.0 - tanh(phi/epsD)^2) / (2.0*epsD));
+  real vdWLoc = intN(Mesh)(v * (1.0 - tanh(phi/epsD)^2) / (2.0*epsD));
+  real narrowGlob=0, vNarrowGlob=0, dWGlob=0, vdWGlob=0;
+  mpiAllReduce(narrowLoc, narrowGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(vNarrowLoc, vNarrowGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(dWLoc, dWGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(vdWLoc, vdWGlob, mpiCommWorld, mpiSUM);
+  real vNarrowMean = vNarrowGlob / (narrowGlob + 1e-30);
+  real vSurfMean = vdWGlob / (dWGlob + 1e-30);
+  // Surface-averaged |grad phi| (see the print below for why this matters).
+  real ngSurfLoc = intN(Mesh)(normgradphi * (1.0 - tanh(phi/epsD)^2) / (2.0*epsD));
+  real ngSurfGlob = 0;
+  mpiAllReduce(ngSurfLoc, ngSurfGlob, mpiCommWorld, mpiSUM);
+  // dV/dt implied by the surface velocity: area ~ int(delta(phi))
+  real dVdtPredicted = vSurfMean * dWGlob;
+
+  if (mpirank==0) {
+    cout << "DEBUG_SENS t=" << t
+         << " F.max=" << FmaxGlob << " F.min=" << FminGlob << " F/filmCapacity.max=" << (FmaxGlob/filmCapacity)
+         << " DeO2.max=" << DeO2maxGlob << " DeO2.min=" << DeO2minGlob
+         << " vO2.min=" << vO2minGlob << " vO2.max=" << vO2maxGlob
+         << " vZn.min=" << vZnminGlob << " vZn.max=" << vZnmaxGlob
+         << " v.min=" << vminGlob << " v.max=" << vmaxGlob
+         << " v.bandMean=" << vBandMean << " bandVol=" << bandGlob
+         << " v.narrowMean=" << vNarrowMean
+         << " v.surfMean=" << vSurfMean
+         << " surfArea=" << dWGlob
+         << " dVdt_pred=" << dVdtPredicted
+         // |grad phi| at the interface. Should be ~1 for a signed distance
+         // function. With redistancing off it drifts, and the level-set
+         // advection moves the front at v*|grad phi| -- so drift away from 1
+         // is a direct, compounding error on the interface speed. Monitored
+         // because the redistancing artifact (0.256% of the scaffold per
+         // call) forces calibration to run with redistancing DISABLED.
+         << " gradphi_surf=" << (ngSurfGlob / (dWGlob + 1e-30))
+         << endl;
+  }
+}
+
+mpiBarrier(mpiCommWorld);
+
+ENDIFMACRO//

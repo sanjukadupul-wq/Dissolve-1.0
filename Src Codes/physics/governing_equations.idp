@@ -1,0 +1,137 @@
+// physics/governing_equations.idp
+// ---------------------------------------------------------------------------
+// Discrete weak forms for the coupled degradation model. Six fields are
+// solved each timestep (backward Euler, mass-lumped P1):
+//   Zn   dissolved Zn2+                phi  solid/medium level-set
+//   F    corrosion-product film state  Cl   dissolved Cl-
+//   O2   dissolved O2 (ORR sink)       OH   dissolved OH- (ORR + film byproduct)
+// plus, when -enable_flow is on, incompressible flow [ux,uy,uz,p] around the
+// scaffold via a fictitious-domain penalty (scaffold blocked from flow by a
+// PENALTY term rather than a boundary-fitted no-slip surface).
+//
+// Two rate expressions recur across the Zn/film equations and are written
+// once below instead of inline in each varf:
+//   fFormationRate -- Zn is oxidized and locked into the film, throttled to
+//                      zero as the film saturates toward filmCapacity.
+//   fDissolutionRate -- the film is undercut by chloride attack, releasing
+//                      Zn2+ back into solution. Second order in local Cl-.
+// Every species/film varf below uses qfV=qfV1lump (backward Euler with a
+// lumped mass matrix) -- see the note above `shrink` for why that matters
+// for the level-set equation specifically.
+// ---------------------------------------------------------------------------
+
+IFMACRO(!idpGoverningEquations)
+macro idpGoverningEquations 1//
+
+macro fFormationRate kf*Zn*(1.0 - F/filmCapacity) //EOM
+macro fDissolutionRate kd*F*Cl*Cl //EOM
+
+// --- Oxygen transport + surface ORR sink ------------------------------------
+// dO2/dt + div(u O2) = div(DeO2 grad O2), with O2 consumed by the cathodic
+// reaction O2 + 2H2O + 4e- -> 4OH- only AT the metal/medium interface --
+// hence a surface (levelset) integral rather than a bulk volumetric sink.
+varf oxygen(O2, wO2) =
+  intN(Mesh, qfV=qfV1lump, optimize=0)(O2/dt*wO2)
+  + intN(Mesh, qfV=qfV1lump, optimize=0)(timeDerivMult*O2old/dt*wO2)
+  + intN(Mesh)(DeO2*(dx(O2)*dx(wO2) + dy(O2)*dy(wO2) + dz(O2)*dz(wO2)))
+  + intN(Mesh)(convectionMult*(phi <= 0)*convect([upx,upy,upz], -dt, O2old)*wO2/dt)
+  + int2d(Mesh, levelset=phi)(kORR*O2*wO2)
+  + on(InletTag, O2=o2Initial)
+;
+
+// --- Zn2+ transport ----------------------------------------------------------
+// dZn/dt + div(u Zn) = div(DeZn grad Zn) - fFormationRate + fDissolutionRate.
+// Zn is pinned to the saturation value znBoundaryConc wherever phi > 0 (inside the
+// still-solid scaffold) via a PENALTY penalty rather than a boundary-fitted
+// Dirichlet condition, since the solid/medium boundary moves every step.
+varf zinc(Zn, wZn) =
+  intN(Mesh, qfV=qfV1lump, optimize=0)(Zn/dt*wZn)
+  + intN(Mesh, qfV=qfV1lump, optimize=0)(timeDerivMult*Znold/dt*wZn)
+  + intN(Mesh)(DeZn*(dx(Zn)*dx(wZn) + dy(Zn)*dy(wZn) + dz(Zn)*dz(wZn)))
+  + intN(Mesh)(convectionMult*(phi <= 0)*convect([upx,upy,upz], -dt, Znold)*wZn/dt)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fFormationRate*wZn)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fDissolutionRate*wZn)
+  + intN(Mesh, qfV=qfV1lump)((phi > 0)*PENALTY*Zn*wZn)
+  + intN(Mesh, qfV=qfV1lump)((phi > 0)*PENALTY*znBoundaryConc*wZn)
+;
+
+// --- Corrosion-product film state -------------------------------------------
+// dF/dt = fFormationRate + fDissolutionRate (no transport -- F only exists
+// as a per-node state variable at the interface, not a diffusing species).
+varf film(F, wF) =
+  intN(Mesh, qfV=qfV1lump, optimize=0)(F/dt*wF)
+  + intN(Mesh, qfV=qfV1lump, optimize=0)(Fold/dt*wF)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*kf*Zn*F/filmCapacity*wF)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*kf*Zn*wF)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fDissolutionRate*wF)
+;
+
+// --- Cl- transport -------------------------------------------------------
+// Pure transport, no volumetric source/sink -- Cl- only participates in the
+// film-dissolution rate above, which consumes film state and releases Zn2+
+// but does not remove Cl- from solution in this model.
+varf chloride(Cl, wCl) =
+  intN(Mesh, qfV=qfV1lump, optimize=0)(Cl/dt*wCl)
+  + intN(Mesh, qfV=qfV1lump, optimize=0)(timeDerivMult*Clold/dt*wCl)
+  + intN(Mesh)(DeCl*(dx(Cl)*dx(wCl) + dy(Cl)*dy(wCl) + dz(Cl)*dz(wCl)))
+  + intN(Mesh)(convectionMult*(phi <= 0)*convect([upx,upy,upz], -dt, Clold)*wCl/dt)
+;
+
+// --- OH- transport + sources -------------------------------------------------
+// Two production terms: chloride-driven film dissolution releases OH- along
+// with Zn2+, and the ORR produces 4 OH- per O2 consumed (see `oxygen` above
+// for the stoichiometry) -- both are surface/interface effects, so the ORR
+// term is again a levelset integral rather than volumetric.
+varf hydroxide(OH, wOH) =
+  intN(Mesh, qfV=qfV1lump, optimize=0)(OH/dt*wOH)
+  + intN(Mesh, qfV=qfV1lump, optimize=0)(timeDerivMult*OHold/dt*wOH)
+  + intN(Mesh)(DeOH*(dx(OH)*dx(wOH) + dy(OH)*dy(wOH) + dz(OH)*dz(wOH)))
+  + intN(Mesh)(convectionMult*(phi <= 0)*convect([upx,upy,upz], -dt, OHold)*wOH/dt)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fDissolutionRate*wOH)
+  + int2d(Mesh, levelset=phi)(4.0*kORR*O2*wOH)
+;
+
+// --- Level-set advection of the solid/medium interface ----------------------
+// dphi/dt + v|grad phi| = 0, v the (non-positive) interface recession speed
+// computed in physics/interface_velocity.idp.
+//
+// Mass-lumped (qfV=qfV1lump), unlike the species equations above only by
+// necessity elsewhere -- this was originally assembled with a consistent
+// mass matrix and was the one equation producing spurious oscillation: with
+// v <= 0 everywhere (a physical invariant -- the interface can only recede,
+// verified via v.max=0), the discretized scaffold volume was nonetheless
+// increasing on ~1 in 4 steps at dt=0.25h, at an amplitude ~200x the real
+// physical signal. A consistent mass matrix is a textbook source of that
+// behaviour in pure-advection problems; lumping removed it entirely (0
+// spurious increases across every dt retested). Found 2026-08-14.
+varf shrink(phi, wPhi) =
+  intN(Mesh, qfV=qfV1lump, optimize=0)(phi/dt*wPhi)
+  + intN(Mesh, qfV=qfV1lump, optimize=0)(phiold/dt*wPhi)
+  + intN(Mesh, qfV=qfV1lump, optimize=0)(v*normgradphi*wPhi)
+;
+
+// --- Incompressible flow around the scaffold (optional, -enable_flow) -------
+// Standard velocity/pressure saddle-point form; the scaffold is blocked from
+// flow with a PENALTY penalty (scaffold*tgv*u*wu) rather than a body-fitted
+// no-slip surface, since the geometry changes every step.
+varf navierstokes([ux, uy, uz, p], [wux, wuy, wuz, wp]) =
+  intN(Mesh)(nsEnableMult/dt*[ux, uy, uz]'*[wux, wuy, wuz])
+  + intN(Mesh)(
+        nue*(Grad(u):Grad(wu))
+      - p*div(wu)
+      - wp*div(u)
+      - 1e-10*p*wp
+    )
+  + intN(Mesh)(
+      nsEnableMult/dt*[convect([upx, upy, upz], -dt, upx),
+                 convect([upx, upy, upz], -dt, upy),
+                 convect([upx, upy, upz], -dt, upz)]'*[wux, wuy, wuz]
+    )
+  + intN(Mesh)(scaffold*tgv*ux*wux)
+  + intN(Mesh)(scaffold*tgv*uy*wuy)
+  + intN(Mesh)(scaffold*tgv*uz*wuz)
+  + on(WallTag, ux=0, uy=0, uz=0)
+  + on(InletTag, ux=inflowX, uy=inflowY, uz=inflowZ)
+;
+
+ENDIFMACRO//
