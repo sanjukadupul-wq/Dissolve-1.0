@@ -123,11 +123,11 @@ real del = getARGV("-film_constrictivity", 1.);
 // to match the naming used in the paper figures. -k_f/-k_d are the current
 // flags; -k1/-k2 are no longer accepted.
 real kf = getARGV("-k_f", 125.);
-real kd = getARGV("-k_d", 40.);
+real kd = getARGV("-k_d", 39.);
 
 // --- Material densities (g/mm^3) --------------------------------------------
 real znDensity = getARGV("-rho_zn", 0.00714);
-real filmDensity = getARGV("-rho_film", 0.003998);
+real filmDensity = getARGV("-rho_film", 0.005606);
 real filmCapacityScale = getARGV("-film_capacity_scale", 1.);
 real filmCapacity = filmDensity * (1 - eps) * filmCapacityScale;
 
@@ -138,17 +138,23 @@ real znMolarConc = getARGV("-zn_molar_conc", 1.09e-4);  // mol/mm^3
 // was defined above but never referenced anywhere until this fix (2026-08-14) --
 // see state/fields.idp's velocityDenom and state/initial_state.idp's calculateAlpha call.
 real rhoZnSolid = znDensity;
-real znBoundaryConc = getARGV("-zn_boundary_conc", 1.00e-5);        // g/mm^3
+// [Zn]_sat = 10 mg/L (paper Table 3) = 1.00e-8 g/mm^3. Was 1.00e-5 (10 g/L,
+// a 1000x mg->g conversion error) until corrected against the paper (2026-09-08).
+real znBoundaryConc = getARGV("-zn_boundary_conc", 1.00e-8);        // g/mm^3
 
 // --- Diffusion coefficients (mm^2/hour) -------------------------------------
-real diffZn = getARGV("-diff_zn", 3.38);
-real diffCl = getARGV("-diff_cl", 9.7);
-real diffOH = getARGV("-diff_oh", 25.45);
-real diffO2 = getARGV("-diff_o2", 10.8);
+// Paper Table 3 (37 degC), converted from mm^2/s to mm^2/h (x3600):
+// D_Zn=7.56e-4, D_Cl=2.16e-3, D_OH=5.60e-3, D_O2=2.60e-3 mm^2/s.
+real diffZn = getARGV("-diff_zn", 2.72);
+real diffCl = getARGV("-diff_cl", 7.78);
+real diffOH = getARGV("-diff_oh", 20.16);
+real diffO2 = getARGV("-diff_o2", 9.36);
 
 // --- Initial species concentrations (g/mm^3) --------------------------------
 real cl0 = getARGV("-cl0", 5.043e-6);
-real oh0 = getARGV("-oh0", 2.51e-7);
+// pH 7.40 at 37 degC (pKw~13.6): pOH=6.20 -> [OH-]=10^-6.20=6.31e-7 mol/L
+// -> 1.07e-11 g/mm^3 (paper Table 3 initial pH).
+real oh0 = getARGV("-oh0", 1.07e-11);
 real o2Initial = getARGV("-o2_initial", 3.5e-9);
 
 // --- Oxygen reduction reaction (ORR) kinetics (1/hour) ----------------------

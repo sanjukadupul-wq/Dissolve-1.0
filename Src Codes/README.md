@@ -174,7 +174,7 @@ Grouped by what each one actually controls, not by file.
 | flag | default | meaning |
 |---|---|---|
 | `-k_f` | 125 | film formation rate |
-| `-k_d` | 40 | chloride-driven film degradation rate |
+| `-k_d` | 39 | chloride-driven film degradation rate |
 | `-k_orr` | 0.015 | oxygen reduction reaction rate constant |
 | `-film_tortuosity` | 2.0 | film tortuosity (diffusion-blocking strength) |
 | `-diff_zn`, `-diff_cl`, `-diff_oh`, `-diff_o2` | material defaults | species diffusivities |
