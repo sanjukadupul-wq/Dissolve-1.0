@@ -359,7 +359,7 @@ You should see the main project directories, including:
 ```text
 Src Codes/
 Mesh Generation/
-Calibration/
+scripts/
 Results/
 Third-Party Software/
 ```
@@ -760,7 +760,7 @@ Once Dissolve™ is running successfully on either a workstation or HPC system, 
 - [`../README.md`](../README.md) for solver configuration options
 - [`THEORY.md`](THEORY.md) for the governing equations and numerical methods
 - [`../Mesh Generation/`](../Mesh%20Generation/) for creating new implant geometries
-- [`../Calibration/`](../Calibration/) for parameter identification workflows
+- [`../scripts/`](../scripts/) for parameter identification workflows
 - [`../Results/`](../Results/) for example benchmark datasets
 
 Your Dissolve™ installation is now fully configured and ready for degradation
