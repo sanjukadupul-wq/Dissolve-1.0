@@ -81,7 +81,8 @@ real meshHMin = getARGV("-mesh_h_min", 4e-2);
 real meshHMax = getARGV("-mesh_h_max", 0.8);
 
 // --- Time stepping (hours) ------------------------------------------------
-real dt = getARGV("-dt_hours", 1.0);
+// Paper Table S4: dt = 0.25 h, level-set reinitialization every 1.0 h.
+real dt = getARGV("-dt_hours", 0.25);
 
 real saveIntervalHours = getARGV("-save_interval", dt);
 real saveRatio = saveIntervalHours / dt;
@@ -118,12 +119,13 @@ real tau = getARGV("-film_tortuosity", 2.00);
 real eps = getARGV("-film_porosity", 0.25);
 real del = getARGV("-film_constrictivity", 1.);
 
-// --- Reaction kinetics (1/hour and mm^3/(g.hour)) --------------------------
+// --- Reaction kinetics (paper Table 2, optimized values) --------------------
+// kf [1/h], kd [mm^6/(g^2.h)], kORR [mm/h].
 // Renamed from k1/k2 to kf/kd (film FORMATION rate, film DEGRADATION rate)
 // to match the naming used in the paper figures. -k_f/-k_d are the current
 // flags; -k1/-k2 are no longer accepted.
-real kf = getARGV("-k_f", 125.);
-real kd = getARGV("-k_d", 39.);
+real kf = getARGV("-k_f", 35.91);
+real kd = getARGV("-k_d", 27.17);
 
 // --- Material densities (g/mm^3) --------------------------------------------
 real znDensity = getARGV("-rho_zn", 0.00714);
@@ -138,12 +140,12 @@ real znMolarConc = getARGV("-zn_molar_conc", 1.09e-4);  // mol/mm^3
 // was defined above but never referenced anywhere until this fix (2026-08-14) --
 // see state/fields.idp's velocityDenom and state/initial_state.idp's calculateAlpha call.
 real rhoZnSolid = znDensity;
-// [Zn]_sat = 10 mg/L (paper Table 3) = 1.00e-8 g/mm^3. Was 1.00e-5 (10 g/L,
+// [Zn]_sat = 10 mg/L (paper Table 1) = 1.00e-8 g/mm^3. Was 1.00e-5 (10 g/L,
 // a 1000x mg->g conversion error) until corrected against the paper (2026-09-08).
 real znBoundaryConc = getARGV("-zn_boundary_conc", 1.00e-8);        // g/mm^3
 
 // --- Diffusion coefficients (mm^2/hour) -------------------------------------
-// Paper Table 3 (37 degC), converted from mm^2/s to mm^2/h (x3600):
+// Paper Table 1 (37 degC), converted from mm^2/s to mm^2/h (x3600):
 // D_Zn=7.56e-4, D_Cl=2.16e-3, D_OH=5.60e-3, D_O2=2.60e-3 mm^2/s.
 real diffZn = getARGV("-diff_zn", 2.72);
 real diffCl = getARGV("-diff_cl", 7.78);
@@ -152,13 +154,15 @@ real diffO2 = getARGV("-diff_o2", 9.36);
 
 // --- Initial species concentrations (g/mm^3) --------------------------------
 real cl0 = getARGV("-cl0", 5.043e-6);
-// pH 7.40 at 37 degC (pKw~13.6): pOH=6.20 -> [OH-]=10^-6.20=6.31e-7 mol/L
-// -> 1.07e-11 g/mm^3 (paper Table 3 initial pH).
-real oh0 = getARGV("-oh0", 1.07e-11);
+// Initial pH 7.40 (paper Table 1). The paper's pH definition (Eq. S2) uses
+// pKw = 14: pOH = 6.60 -> [OH-] = 10^-6.60 = 2.51e-7 mol/L = 4.27e-12 g/mm^3,
+// so the initial state reads back as pH 7.40 in post-processing.
+real oh0 = getARGV("-oh0", 4.27e-12);
 real o2Initial = getARGV("-o2_initial", 3.5e-9);
 
-// --- Oxygen reduction reaction (ORR) kinetics (1/hour) ----------------------
-real kORR = getARGV("-k_orr", 0.015);
+// --- Oxygen reduction reaction (ORR) kinetics (mm/hour) ---------------------
+// First-order surface rate constant: flux = kORR*[O2] at the interface (paper Eq. 7).
+real kORR = getARGV("-k_orr", 0.51);
 int useORR = getARGV("-use_orr", 1);
 
 // O2 under-relaxation, applied in numerics/timestep_solver.idp as

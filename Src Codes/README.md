@@ -129,27 +129,29 @@ can be overridden from the command line, e.g. `-k_f`, `-k_orr`, `-dt_hours`,
 path — this has caused several silent failures during development. Keep
 meshes in a space-free directory.
 
-## Validated configuration
+## Reference configuration (paper)
 
-The parameters below reproduce the experimental mass-loss curve within
-10% at every measured timepoint (24/72/168/336/672h) on the production
-mesh. Full derivation, the bugs that had to be fixed first, and what's
-still open: **[`VALIDATION.md`](VALIDATION.md)** — read this before trusting
-or extending any result from this solver.
+The defaults in `config/settings.idp` follow the paper ("A Mechanistic
+Framework for Predicting the Biodegradation of Zinc Implants"): Table 1
+material/film/initial conditions, Table 2 optimized kinetic parameters
+(`kf` = 35.91 h⁻¹, `kd` = 27.17 mm⁶ g⁻² h⁻¹, `kORR` = 0.51 mm h⁻¹) and the
+Table S4 numerical settings (Δt = 0.25 h, level-set reinitialization every
+1.0 h, 30 × 30 × 30 mm electrolyte domain, 3.5 mg/L O₂ Dirichlet at the top
+surface). The calibrated values were fitted on the Ø10 × 2 mm disc and reused
+unchanged for the stent. Source data for all paper figures/tables is in
+[`../Results/Computational/Computational_results.xlsx`](../Results/Computational/Computational_results.xlsx).
 
 ```bash
-mpirun -np 16 FreeFem++-mpi -nw dissolve.edp -v 0 \
+mpirun -np 50 FreeFem++-mpi -nw dissolve.edp -v 0 \
   -input_mesh path/to/your.mesh \
-  -dt_hours 4.0 -sim_duration 672.0 -save_interval 4.0 \
-  -k_orr 0.25 -k_f 10 -k_d 39.22 -film_tortuosity 120.0 \
-  -enable_redistance 0 -vel_extension 1 -h_interface 0.05 -search_method 1 \
+  -dt_hours 0.25 -sim_duration 672.0 -redistance_interval 1.0 \
   -checkpoint_each_time 24 \
   -results_file output/result.txt
 ```
 
-These fitted values (`kORR`, `k_f`, `tau`) are specific to this mesh's
-resolution — see `VALIDATION.md`'s "Mesh Dependency" section before reusing
-them on a different mesh or geometry.
+[`VALIDATION.md`](VALIDATION.md) documents the earlier, pre-paper development
+validation (different parameter set, coarser time step); read it for the
+history of the bug fixes, but the numbers there do not describe these defaults.
 
 ## Key Features
 
@@ -173,9 +175,9 @@ Grouped by what each one actually controls, not by file.
 **Kinetics** (`config/settings.idp`)
 | flag | default | meaning |
 |---|---|---|
-| `-k_f` | 125 | film formation rate |
-| `-k_d` | 39 | chloride-driven film degradation rate |
-| `-k_orr` | 0.015 | oxygen reduction reaction rate constant |
+| `-k_f` | 35.91 | film formation rate (h⁻¹) |
+| `-k_d` | 27.17 | chloride-driven film degradation rate (mm⁶ g⁻² h⁻¹) |
+| `-k_orr` | 0.51 | oxygen reduction reaction rate constant (mm h⁻¹) |
 | `-film_tortuosity` | 2.0 | film tortuosity (diffusion-blocking strength) |
 | `-diff_zn`, `-diff_cl`, `-diff_oh`, `-diff_o2` | material defaults | species diffusivities |
 
@@ -259,7 +261,7 @@ below is the provided tool for recalibrating `kf`/`kd`/`kORR` against new data.
   `../Calibration/requirements.txt` installed (`bayes_opt`, `scikit-learn`,
   `rich`, etc. — not part of this project's core dependencies).
 - **`sensitivity_morris.py`** — Morris (Elementary Effects) global
-  sensitivity screening over 8 parameters (`k1`, `k2`, `k_orr`, `d_o2`,
+  sensitivity screening (r = 20 trajectories, 180 runs, mass loss at 168 h) over 8 parameters (`k1`, `k2`, `k_orr`, `d_o2`,
   `initial_o2`, `d_zn`, `d_cl`, `d_oh`) via `SALib`, ranking each by its
   mean absolute effect (μ\*) on RMSE against experimental checkpoints.
   Also needs `../Calibration/requirements.txt`.

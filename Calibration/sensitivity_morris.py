@@ -19,7 +19,7 @@ Usage (run from Src Codes/, with a mesh available):
     python3 calibration/sensitivity_morris.py
     CALIB_LAUNCHER=m3 python3 calibration/sensitivity_morris.py   # on an M3 SLURM job
 
-Total simulations = r * (k + 1) = 5 * (8 + 1) = 45 runs.
+Total simulations = r * (k + 1) = 20 * (8 + 1) = 180 runs.
 """
 
 import os
@@ -55,12 +55,12 @@ WORKDIR = Path(__file__).resolve().parent.parent / "Src Codes"  # solver root
 MESH_FILE = os.environ.get("CALIB_MESH", "cylinder_10x2_scaffold_in_box.mesh")  # supply this
 
 CORES = int(os.environ.get("SLURM_NTASKS", os.environ.get("CALIB_NP", "8")))
-FINAL_TIME = 24.0
-TIME_STEP = 1.0
+FINAL_TIME = 168.0      # response metric: mass loss after 168 h (paper Table S6)
+TIME_STEP = 0.25
 REDISTANCE_TIME = 1.0
 
 # Morris Method Settings (unchanged from the original)
-NUM_TRAJECTORIES = 5  # r=5 -> 5*(8+1) = 45 simulations
+NUM_TRAJECTORIES = 20  # r=20 -> 20*(8+1) = 180 simulations (paper Table S6)
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 RESULTS_DIR = str(WORKDIR / "output_sensitivity" / f"sensitivity_{timestamp}")
@@ -104,11 +104,11 @@ def build_command(k1, k2, k_orr, d_o2, initial_o2, d_zn, d_cl, d_oh):
 # Experimental data -- inline, matching calibrate_kinetics.py's checkpoints
 # (this repo has no experimental_data.xlsx export; the original external
 # CSV dependency is replaced with the same values used elsewhere in this
-# project, restricted to checkpoints within FINAL_TIME=24h).
+# project, restricted to checkpoints within FINAL_TIME=168h).
 # ---------------------------------------------------------------------------
 _ALL_EXP = pd.DataFrame({
-    "TimeHours": [24, 72, 168, 336, 672],
-    "MassLossPercent": [0.045, 0.105, 0.209, 0.254, 0.31],
+    "TimeHours": [24, 48, 120, 168, 240, 336],
+    "MassLossPercent": [0.05, 0.09, 0.13, 0.20, 0.27, 0.32],
 })
 EXP_DATA = _ALL_EXP[_ALL_EXP["TimeHours"] <= FINAL_TIME].reset_index(drop=True)
 if EXP_DATA.empty:
@@ -120,14 +120,14 @@ problem = {
     'num_vars': 8,
     'names': ['k1', 'k2', 'k_orr', 'd_o2', 'initial_o2', 'd_zn', 'd_cl', 'd_oh'],
     'bounds': [
-        [50.0, 200.0],      # k1
-        [1.0, 50.0],        # k2
+        [50.0, 200.0],      # k1  (kf, paper Table S5)
+        [1.0, 50.0],        # k2  (kd)
         [0.1, 5.0],         # k_orr
         [5.0, 20.0],        # d_o2
         [1e-9, 1e-7],       # initial_o2
-        [1.5, 5.0],         # d_zn (Default ~3.38)
-        [5.0, 15.0],        # d_cl (Default ~9.7)
-        [15.0, 35.0]        # d_oh (Default ~25.45)
+        [1.5, 5.0],         # d_zn (Default 2.72)
+        [5.0, 15.0],        # d_cl (Default 7.78)
+        [15.0, 35.0]        # d_oh (Default 20.16)
     ]
 }
 

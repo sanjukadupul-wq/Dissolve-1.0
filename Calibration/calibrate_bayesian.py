@@ -115,13 +115,14 @@ except Exception as e:
 print(f"DEBUG: Using {CORES} cores for simulation.")
 
 # --- Optimization budget/targets (unchanged from the original) ---
-TOTAL_RUNS = 20        # Initial batch size
-MAX_TOTAL_RUNS = 100    # Limit runs to 100
+# Paper Table S10: 12-point initial design, 32 total evaluations, target RMSE 0.05%.
+TOTAL_RUNS = 32
+MAX_TOTAL_RUNS = 32
 TARGET_RMSE = 0.05      # Research Grade Goal
-INIT_POINTS = 5
+INIT_POINTS = 12
 
 FINAL_TIME = 336.0      # Matches largest calibration point
-TIME_STEP = 1.0         # 1h Time Step
+TIME_STEP = 0.25        # 0.25h Time Step (paper Table S4)
 REDISTANCE_TIME = 1.0   # 1h Redistance
 
 # ---------------------------------------------------------------------------
@@ -160,8 +161,8 @@ def build_command(k1, k2, k_orr):
 # this project for consistency).
 # ---------------------------------------------------------------------------
 EXP_DATA = pd.DataFrame({
-    "TimeHours": [24, 72, 168, 336, 672],
-    "MassLossPercent": [0.045, 0.105, 0.209, 0.254, 0.31],
+    "TimeHours": [24, 48, 120, 168, 240, 336],
+    "MassLossPercent": [0.05, 0.09, 0.13, 0.20, 0.27, 0.32],
 })
 EXP_DATA = EXP_DATA[EXP_DATA["TimeHours"] <= FINAL_TIME].reset_index(drop=True)
 
@@ -547,11 +548,11 @@ def simulation_objective(k1, k2, k_orr):
             return -1e9
 
 
-# --- Optimization Setup (bounds UNCHANGED from the original) ---
+# --- Optimization Setup (bounds = paper Table 2 search ranges) ---
 pbounds = {
-    'k1': (100.0, 1000.0),
-    'k2': (0.0, 100.0),
-    'k_orr': (0.1, 10.0)
+    'k1': (1.0, 100.0),      # kf  [1/h]           (paper Table 2)
+    'k2': (5.0, 100.0),      # kd  [mm^6/(g^2 h)]  (paper Table 2)
+    'k_orr': (0.05, 5.0)     # kORR [mm/h]         (paper Table 2)
 }
 
 n_completed = len(checkpoint_data)
