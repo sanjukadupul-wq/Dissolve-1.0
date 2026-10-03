@@ -1,0 +1,100 @@
+// utils/helpers.idp
+// Shared macros, vector-calculus shorthands, and small utility functions
+// used throughout the solver.
+
+IFMACRO(!idpHelpers)
+macro idpHelpers 1//
+
+macro grad(f) [dx(f), dy(f), dz(f)] //EOM
+
+macro div(u) (dx(u#x) + dy(u#y) + dz(u#z))//EOM
+
+macro Grad(u) [grad(u#x), grad(u#y), grad(u#z)]//EOM
+
+macro print(text)
+{
+	cout << text << endl;
+	cout.flush;
+} //EOM
+
+macro printDivider
+{
+	print("=============================================================");
+} //EOM
+
+func int printHeader()
+{
+	cout<<"+---------------------------------------------------------------+\n";
+	cout<<"|                                                               |\n";
+	cout<<"|   ____   ___  ____  ____    ___   _    __     __ _____        |\n";
+	cout<<"|  |  _ \\ |_ _|/ ___|/ ___|  / _ \\ | |   \\ \\   / /| ____|       |\n";
+	cout<<"|  | | | | | | \\___ \\___ \\ | | | || |    \\ \\ / / |  _|          |\n";
+	cout<<"|  | |_| | | |  ___) ___) || |_| || |___   \\ V /  | |___        |\n";
+	cout<<"|  |____/ |___||____/|____/  \\___/ |_____|   \\_/   |_____|      |\n";
+	cout<<"|                                                               |\n";
+	cout<<"|  Degradation In-Silico Solver                                 |\n";
+	cout<<"+---------------------------------------------------------------+\n";
+	cout<<"|  Reaction-diffusion + level-set model of Zn-alloy             |\n";
+	cout<<"|  corrosion, coupled to ORR surface kinetics                   |\n";
+	cout<<"|                                                               |\n";
+	cout<<"|  v1.0                                                         |\n";
+	cout<<"+---------------------------------------------------------------+\n";
+	return 0;
+}
+
+func box = (x > (L/2 - scaffoldSizeX/2)) * (x < (L/2 + scaffoldSizeX/2))
+         * (y > (L/2 - scaffoldSizeY/2)) * (y < (L/2 + scaffoldSizeY/2))
+         * (z > (L/2 - scaffoldSizeZ/2)) * (z < (L/2 + scaffoldSizeZ/2));
+
+func real processRegion(int region)
+{
+	if (region == scaffoldRegionTag)
+		return 0.5;
+	else
+		return -0.5;
+}
+
+func bool fileExists(string path)
+{
+  try
+  {
+    ifstream file(path);
+    return true;
+  }
+  catch(...)
+  {
+    return false;
+  }
+}
+
+// Round to 2 decimal places for display. cout.precision() controls
+// significant figures (C++ default), not decimal places, so it can't give
+// "11.33" for a solve time -- this does, via string concatenation.
+func real round2(real x)
+{
+	return int(x*100.0 + 0.5) / 100.0;
+}
+
+// Human-readable "Xd Yh" for simulated time -- these runs go out to 8766h
+// (12 months), so a raw hour count is hard to place at a glance.
+func string formatDuration(real hours)
+{
+	int totalHours = int(hours + 0.5);
+	int days = totalHours / 24;
+	int hrs  = totalHours % 24;
+	if (days > 0)
+		return days + "d " + hrs + "h";
+	return hrs + "h";
+}
+
+macro setCPUTime
+{
+	cpuTime = mpiWtime();
+} //EOM
+
+macro printElapsedTime
+{
+	print("Solved in " + round2(mpiWtime() - cpuTime) + " s")
+} //EOM
+
+ENDIFMACRO//

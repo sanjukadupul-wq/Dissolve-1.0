@@ -1,0 +1,219 @@
+// numerics/timestep_solver.idp
+// Solves each governing equation for the current time step: level set,
+// redistancing, Zn/Cl/film/O2/OH transport, and (optionally) fluid flow.
+
+IFMACRO(!idpTimestepSolver)
+macro idpTimestepSolver 1//
+
+if (enableLevelSet)
+{
+  if (mpirank==0) { print("Solving level-set equation..."); setCPUTime }
+
+  Loc = shrink(SpaceP1, SpaceP1);
+  B = shrink(0, SpaceP1);
+  A = Loc;
+  phi[] = A^-1 * B;
+
+  if (mpirank==0) { printElapsedTime }
+}
+
+if (enableRedistancing)
+{
+  if (t >= nextRedistanceTime)
+  {
+    if (mpirank == 0)
+      print("Redistancing the distance function...")
+
+    // Volume BEFORE reinitialization -- direct check (2026-08-14) of
+    // whether distance()/restrict() is volume-preserving, per the huge
+    // with/without redistancing mass-loss discrepancy found today.
+    real volBeforeLoc = intN(MeshNoOverlap)((phi > 0));
+    real volBeforeGlob = 0;
+    mpiAllReduce(volBeforeLoc, volBeforeGlob, mpiCommWorld, mpiSUM);
+
+    fespace SpaceBackup(MeshBackup, Pk);
+    SpaceBackup phiG, phiReduce;
+
+    phiTemp = phi;
+    phiTemp[] .*= A.D;
+
+    int[int] rst = restrict(SpaceP1, SpaceBackup, newToOldGlobal);
+
+    phiG = 0;
+    for[i, v : rst] phiG[][v] = phiTemp[][i];
+
+    phiReduce = 0;
+    mpiAllReduce(phiG[], phiReduce[], mpiCommWorld, mpiSUM);
+
+    // Stage V1: after restrict() + the sum-reduce onto MeshBackup, BEFORE
+    // distance() runs. MeshBackup is a fully-replicated (non-partitioned)
+    // mesh -- every rank now holds the complete summed field, so this is
+    // already a global volume, no further mpiAllReduce needed.
+    real V1 = intN(MeshBackup)((phiReduce > 0));
+
+    distance(MeshBackup, phiReduce, phiG[]);
+
+    // Stage V2: after distance(), still on MeshBackup, BEFORE projecting
+    // back onto the original mesh/space.
+    real V2 = intN(MeshBackup)((phiG > 0));
+
+    phiReduce = phiG;
+
+    // Return trip: EXACT index-based gather, not interpolation.
+    // `phi = phiReduce` (what this used to be) is a cross-mesh
+    // INTERPOLATION between the partitioned Mesh and the global,
+    // pre-partition MeshBackup -- per-stage volume instrumentation
+    // (2026-08-14) showed it eating 80-90% of every redistancing call's
+    // volume loss (2-6% of the whole scaffold, per call, hundreds of
+    // calls per run), while the forward trip above was volume-exact
+    // because it uses the `rst` index map.
+    //
+    // The mirrored form below is the canonical FreeFEM prolongation --
+    // see examples/hpddm/restriction-2d-PETSc.edp, which spells out both
+    // directions over ONE restrict() array:
+    //     g[]           = u[](restCond);   // restrict  (big -> small)
+    //     u[](restCond) = uCond[];         // prolong   (small -> big)
+    // Forward here is the scatter `phiG[][v] = phiTemp[][i]`, so the exact
+    // inverse is the gather `phi[][i] = phiG[][v]` over the same `rst`.
+    // Pure index gather: no interpolation, exact by construction.
+    for[i, v : rst] phi[][i] = phiReduce[][v];
+
+    nextRedistanceTime += redistanceInterval;
+
+    // Apples-to-apples check: measure the post-gather volume with the SAME
+    // expression V0 used (direct `(phi>0)` quadrature on MeshNoOverlap),
+    // not via the SpaceP0-projected `scaffold`. V0/V1/V2 all use direct
+    // indicator evaluation; `glob` below uses the P0 projection, so any
+    // V2->V3 gap may be a MEASUREMENT artifact (P0 projection vs
+    // quadrature on interface-straddling elements) rather than real lost
+    // volume -- which the identical pre/post index-gather results suggest.
+    real volAfterDirectLoc = intN(MeshNoOverlap)((phi > 0));
+    real volAfterDirectGlob = 0;
+    mpiAllReduce(volAfterDirectLoc, volAfterDirectGlob, mpiCommWorld, mpiSUM);
+
+    scaffold = (phi > 0);
+    loc = intN(MeshNoOverlap)(scaffold);
+    glob = 0;
+    mpiAllReduce(loc, glob, mpiCommWorld, mpiSUM);
+
+    if (mpirank == 0) {
+      cout << "DEBUG_REDIST_STAGES t=" << t
+           << " V0=" << volBeforeGlob << " V1=" << V1 << " V2=" << V2 << " V3=" << glob
+           << " V3direct=" << volAfterDirectGlob
+           << " dV_restrict=" << (V1 - volBeforeGlob)
+           << " dV_distance=" << (V2 - V1)
+           << " dV_projectback_DIRECT=" << (volAfterDirectGlob - V2)
+           << " dV_P0projection=" << (glob - volAfterDirectGlob)
+           << endl;
+      real dV = glob - volBeforeGlob;
+      real dVpct = (volBeforeGlob > 1e-12) ? (dV / volBeforeGlob * 100.0) : 0.0;
+      cout << "DEBUG_REDIST t=" << t << " V_before=" << volBeforeGlob
+           << " V_after=" << glob << " dV=" << dV << " dV_pct=" << dVpct << endl;
+    }
+
+  }
+}
+
+scaffold = (phi > 0);
+
+if (enableZnEquation)
+{
+  if (mpirank==0) { print("Solving Zn concentration equation..."); setCPUTime }
+
+  Loc = zinc(SpaceP1, SpaceP1);
+  B = zinc(0, SpaceP1);
+  A = Loc;
+  Zn[] = A^-1 * B;
+
+  if (mpirank==0) { printElapsedTime }
+}
+
+if (enableClEquation)
+{
+  if (mpirank==0) { print("Solving Cl- concentration equation..."); setCPUTime }
+
+  Loc = chloride(SpaceP1, SpaceP1);
+  B = chloride(0, SpaceP1);
+  A = Loc;
+  Cl[] = A^-1 * B;
+
+  if (mpirank==0) { printElapsedTime }
+}
+
+if (enableFilmEquation)
+{
+  if (mpirank==0) { print("Solving protective-film formation equation..."); setCPUTime }
+
+  Loc = film(SpaceP1, SpaceP1);
+  B = film(0, SpaceP1);
+  A = Loc;
+  F[] = A^-1 * B;
+
+  if (mpirank==0) { printElapsedTime }
+}
+
+if (enableO2Equation)
+{
+  if (mpirank==0) { print("Solving O2 concentration equation (ORR)..."); setCPUTime }
+
+  O2old = O2;
+
+  Loc = oxygen(SpaceP1, SpaceP1);
+  B = oxygen(0, SpaceP1);
+  A = Loc;
+  O2[] = A^-1 * B;
+
+  // Under-relaxation, rescaled so its effective time constant is INDEPENDENT
+  // of dt (see config/settings.idp for the derivation). The old code used a
+  // hardcoded omega=0.3 every step regardless of dt, which made the O2 lag
+  // 4x longer in real time at dt=4h than at dt=1h -- the leading suspect for
+  // the 5.03% vs 2.20% mass-loss split between those two timesteps on the
+  // same mesh and parameters.
+  //
+  // Computed per step rather than once up front, so this stays correct when
+  // -adaptive_dt varies dt during the run.
+  real omega = o2RelaxOmega;
+  if (o2RelaxScaleWithDt && o2RelaxRefDt > 0)
+    omega = 1.0 - pow(1.0 - o2RelaxOmega, dt / o2RelaxRefDt);
+  omega = max(0.0, min(1.0, omega));  // guard against pathological inputs
+
+  if (mpirank==0 && count == 0)
+    print("O2 under-relaxation: omegaRef=" + o2RelaxOmega + " at refDt="
+          + o2RelaxRefDt + "h  ->  omega=" + omega + " at dt=" + dt + "h");
+
+  O2[] = omega * O2[] + (1.0 - omega) * O2old[];
+
+  if (mpirank==0) { printElapsedTime }
+}
+
+if (enableOHEquation)
+{
+  if (mpirank==0) { print("Solving pH equation..."); setCPUTime }
+
+  Loc = hydroxide(SpaceP1, SpaceP1);
+  B = hydroxide(0, SpaceP1);
+  A = Loc;
+  OH[] = A^-1 * B;
+
+  if (mpirank==0) { printElapsedTime }
+}
+
+if (enableFlowSolve)
+{
+  if (count % flowSolveInterval == 0)
+  {
+    if (mpirank==0) { print("Solving Navier-Stokes equation..."); setCPUTime }
+
+    NS = navierstokes(SpaceVector, SpaceVector, tgv=-1);
+    nsRhs = navierstokes(0, SpaceVector, tgv=-1);
+
+    ux[] = 0;
+    ux[] = NS^-1 * nsRhs;
+
+    if (mpirank==0) { printElapsedTime }
+  }
+}
+
+scaffold = (phi > 0);
+
+ENDIFMACRO//

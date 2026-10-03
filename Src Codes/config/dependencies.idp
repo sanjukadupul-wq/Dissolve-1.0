@@ -1,0 +1,22 @@
+// config/dependencies.idp
+// Third-party FreeFEM plugins and command-line argument parsing.
+
+IFMACRO(!idpDependencies)
+macro idpDependencies 1//
+
+load "PETSc"
+load "msh3"
+
+macro dimension()3// EOM
+
+include "macro_ddm.idp"
+
+load "tetgen"
+load "mshmet"
+load "distance"
+load "mmg"
+load "medit"
+
+include "getARGV.idp"
+
+ENDIFMACRO//

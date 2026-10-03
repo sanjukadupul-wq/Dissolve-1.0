@@ -1,0 +1,16 @@
+# Extra Python dependencies for calibrate_bayesian.py and sensitivity_morris.py.
+# calibrate_kinetics.py (the Nelder-Mead calibrator) only needs numpy/scipy,
+# already assumed available -- this list is additive, for the two BO/GSA
+# scripts specifically.
+
+pandas
+numpy
+matplotlib
+scikit-learn
+bayesian-optimization   # provides the `bayes_opt` module
+SALib                   # Morris sampling/analysis
+rich                    # progress bars / console output
+
+# Optional (both scripts degrade gracefully without these):
+seaborn
+psutil

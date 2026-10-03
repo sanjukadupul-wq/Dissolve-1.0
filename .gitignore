@@ -1,0 +1,16 @@
+# Simulation run artifacts (not source)
+Src Codes/output/
+Src Codes/run.log
+Src Codes/.claude/
+
+# Raw mesh data intentionally excluded from this repo -- regenerate with the
+# scripts in Meshes/Scripts/, or contact the authors for the archived meshes.
+Meshes/Initial Meshes/
+Meshes/Convergence Study Meshes/
+Meshes/Adaptive Mesh Comp/
+Meshes/Degraded Meshes/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+__pycache__/

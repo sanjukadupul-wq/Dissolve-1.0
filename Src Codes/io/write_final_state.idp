@@ -1,0 +1,35 @@
+// io/write_final_state.idp
+// Writes the last computed state of every field to a single ghost-free VTK
+// file once the time loop ends.
+
+IFMACRO(!idpWriteFinalState)
+macro idpWriteFinalState 1//
+
+if (dumpFinalState)
+{
+  fespace SpaceNoGhost(MeshNoOverlap, Pk);
+  SpaceNoGhost phiNew, ZnNew, FNew, ClNew, OHNew, O2New;
+
+  int[int] R = restrict(SpaceNoGhost, SpaceP1, newToOldOverlap);
+
+  phiNew = 0;
+  ZnNew = 0;
+  FNew = 0;
+  ClNew = 0;
+  OHNew = 0;
+  O2New = 0;
+
+  phiNew[] = phi[](R);
+  ZnNew[] = Zn[](R);
+  FNew[] = F[](R);
+  ClNew[] = Cl[](R);
+  OHNew[] = OH[](R);
+  O2New[] = O2[](R);
+
+  savevtk("output/lastState-NoOverlap.vtu", MeshNoOverlap,
+          phiNew, ZnNew, FNew, ClNew, OHNew, O2New,
+          dataname="phi Zn F Cl OH O2",
+          order = orderOut, append = false);
+}
+
+ENDIFMACRO//

@@ -1,0 +1,178 @@
+// domain/mesh_setup.idp
+// Builds (or imports) the computational domain, initializes the level-set
+// field marking the scaffold, and partitions the mesh across MPI ranks.
+
+IFMACRO(!idpMeshSetup)
+macro idpMeshSetup 1//
+
+meshN Mesh;
+meshN MeshNoOverlap;
+meshN MeshBackup;
+meshN initialMesh;
+
+if (mpirank == 0)
+{
+  if (loadMeshFromFile)
+  {
+    print("Reading input mesh...")
+
+
+
+    Mesh = readmesh3(inputMeshPath);
+  }
+  else
+  {
+    Mesh = cube(2, 2, 2, [L*x, L*y, L*z]);
+    real[int] domain = [0, 0, 0, 0, 1];
+    Mesh = tetgreconstruction(Mesh, switch="raAQ", regionlist=domain,
+                              sizeofvolume=(L*1./targetMeshSize)^3 / 6);
+  }
+}
+
+broadcast(processor(0), Mesh);
+// MeshBackup MUST be snapshotted here, before buildDmesh() partitions Mesh
+// below -- distance() (used during redistancing) is a serial, whole-
+// geometry algorithm; it needs a full/replicated mesh, not one rank's
+// partition fragment. Confirmed 2026-08-14: moving this after buildDmesh()
+// crashes immediately ("Assertion fail: kf >= 0 && kf < neF") because
+// MeshBackup became just a partition fragment. The real bug (found via
+// per-stage volume instrumentation in numerics/timestep_solver.idp:
+// restrict() is volume-exact, but redistancing's final `phi = phiReduce`
+// projection from this global MeshBackup back onto the partitioned Mesh
+// eats 80-90% of each call's volume loss) is that THAT return trip has no
+// index mapping analogous to newToOldGlobal -- not that the snapshot timing is
+// wrong. Fix needs a proper reverse map, not a reordering.
+MeshBackup = Mesh;
+initialMesh = Mesh;
+
+fespace SpaceP1(Mesh, Pk);
+fespace SpaceP0(Mesh, P0);
+fespace SpaceVector(Mesh, PkVector);
+
+SpaceP1 phi = 0;
+SpaceP1 phiTemp;
+SpaceP1 mm;
+
+if (mpirank == 0)
+{
+  if (loadMeshFromFile)
+  {
+    string fileName = inputMeshPath + ".sol";
+
+    if (fileExists(fileName))
+    {
+      phi[] = readsol(fileName);
+    }
+    else
+    {
+      print("Detecting mesh regions (vectorized)...")
+      meshN MeshScaffold = trunc(Mesh, region==scaffoldRegionTag);
+
+      // Assign 1.0 where region matches, 0.0 otherwise.
+      phi = (region == scaffoldRegionTag);
+
+      print("")
+
+      phi = phi - 0.5;
+      savesol(fileName, Mesh, phi);
+    }
+  }
+  else
+  {
+    phi = box - 0.5;
+  }
+}
+
+broadcast(processor(0), phi[]);
+
+if (adaptInitialMesh)
+{
+  if (mpirank == 0)
+  {
+    print("Refining mesh...")
+
+    mm = 0.;
+    mm[] = mshmet(Mesh, (phi>0),
+                  normalization=1, aniso=0, nbregul=1,
+                  hmin=meshHMin, hmax=meshHMax, err=mshmetTolerance);
+
+    Mesh = tetgreconstruction(Mesh, switch="raAQ",
+                              sizeofvolume=mm*mm*mm/6.);
+  }
+
+  broadcast(processor(0), Mesh);
+  phi = phi;
+}
+
+if (mpirank == 0)
+{
+  printDivider;
+  print("Finite element DOF: " + SpaceP1.ndof);
+  print("Number of elements: " + Mesh.nt);
+
+  if (dumpInitialMesh)
+  {
+    cout << "Saving initial mesh..." << endl;
+    savevtk("initialMesh.vtu", Mesh, phi, dataname="phi");
+  }
+}
+
+if (mpirank == 0)
+{
+  distance(Mesh, phi, phiTemp[]);
+  phi = phiTemp;
+}
+
+broadcast(processor(0), phi[]);
+
+if (mpirank == 0)
+  print("Partitioning the mesh...")
+
+int[int] newToOldOverlap;
+int[int] newToOldGlobal;
+NewMacro MeshN2O() newToOldGlobal EndMacro
+
+Mat NS, A;
+
+buildDmesh(Mesh);
+
+{
+  macro def(i)[i, i#B, i#C, i#D]//
+  macro init(i)[i, i, i, i]//
+  createMat(Mesh, NS, PkVector)
+}
+
+{
+  macro def(i)i//
+  macro init(i)i//
+  createMat(Mesh, A, Pk)
+}
+
+{
+  fespace SpaceP0Temp(Mesh, P0);
+  SpaceP0Temp part;
+  createPartition(Mesh, part[], P0)
+  MeshNoOverlap = trunc(Mesh, abs(part - 1.0) < 1e-1, new2old = newToOldOverlap);
+}
+
+phi = phi;
+
+if (dumpPartitionedMesh)
+{
+  savevtk("initialMesh_Partitioned_NoOverlap.vtu", MeshNoOverlap,
+          region, dataname="region", append=false);
+  savevtk("initialMesh_Partitioned_Overlapped.vtu", Mesh,
+          region, dataname="region", append=false);
+}
+
+int total = 0;
+int currentDofCount = SpaceP1.ndof;
+mpiAllReduce(currentDofCount, total, mpiCommWorld, mpiSUM);
+
+if (mpirank == 0)
+{
+  print("Average DOF per MPI process: " + total / mpisize);
+  print("Number of MPI processes: " + mpisize);
+}
+
+ENDIFMACRO//

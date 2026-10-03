@@ -1,0 +1,167 @@
+// io/write_results.idp
+// Periodic output: VTK snapshots, mass-loss time series, and mechanism
+// (species/interface) diagnostics.
+
+IFMACRO(!idpWriteResults)
+macro idpWriteResults 1//
+
+// Output folder derived from the text-output path
+string resultsFolder;
+if (resultsFilename.rfind("/") >= 0)
+    resultsFolder = resultsFilename(0:resultsFilename.rfind("/"));
+else
+    resultsFolder = "output";
+
+// --- Current scaffold volume (mass) ----------------------------------------
+real currentVolumeLoc;
+IFMACRO(intN)
+    currentVolumeLoc = intN(MeshNoOverlap)((phi > 0) * 1.0);
+ENDIFMACRO
+IFMACRO(!intN)
+    currentVolumeLoc = int3d(MeshNoOverlap)((phi > 0) * 1.0);
+ENDIFMACRO
+
+real currentVolumeGlob = 0;
+mpiAllReduce(currentVolumeLoc, currentVolumeGlob, mpiCommWorld, mpiSUM);
+
+// --- Smoothed (regularized-Heaviside) volume, DIAGNOSTIC ONLY --------------
+// (phi>0) is a step function evaluated at quadrature points, so the volume
+// above only changes when a quadrature point crosses zero. That makes it
+// QUANTIZED: measured mass loss sits on discrete plateaus and is bit-identical
+// for many steps in a row, which masked genuinely-slow dissolution during the
+// 2026-08-14 interface-velocity work (interface displacements ~1e-7mm flip no
+// quadrature points at all). 0.5*(1+tanh(phi/eps)) is a continuous stand-in
+// that resolves sub-quadrature motion, at the cost of slightly smearing the
+// interface over ~eps. Written to a SEPARATE file, never mixed into
+// resultsFilename -- calibration/calibrate_kinetics.py parses that with a
+// strict `len(parts) == 2` check and would silently drop every row if a third
+// column appeared.
+real volSmoothEps = getARGV("-vol_smooth_eps", 0.05);   // mm
+real smoothVolLoc;
+IFMACRO(intN)
+    smoothVolLoc = intN(MeshNoOverlap)(0.5*(1.0 + tanh(phi/volSmoothEps)));
+ENDIFMACRO
+IFMACRO(!intN)
+    smoothVolLoc = int3d(MeshNoOverlap)(0.5*(1.0 + tanh(phi/volSmoothEps)));
+ENDIFMACRO
+real smoothVolGlob = 0;
+mpiAllReduce(smoothVolLoc, smoothVolGlob, mpiCommWorld, mpiSUM);
+
+if (count % saveIntervalSteps == 0)
+{
+    // --- 1. VTK snapshot for visualization ---------------------------------
+    // Time-based trigger (not step-count-based): fires every vtkSaveEachTime
+    // hours of simulated time, regardless of how big dt is. The "- dt/2"
+    // tolerance matches export_geometry.idp's pattern, so a step that lands
+    // slightly past the threshold still counts as hitting it.
+    if (emitVtkOutput && (t >= nextVtkSaveTime - dt/2))
+    {
+        if (mpirank == 0) cout << "Saving VTK file at t=" << t << "..." << endl;
+
+        if (exportFlowField)
+            savevtk(vtkFilePrefix+".vtu", Mesh, phi, Zn, F, Cl, OH, O2, ux, uy, uz, p,
+                    dataname="phi Zn F Cl OH O2 u v w p",
+                    order=orderOut, append=count ? true : false);
+        else
+            savevtk(vtkFilePrefix+".vtu", Mesh, phi, Zn, F, Cl, OH, O2,
+                    dataname="phi Zn F Cl OH O2",
+                    order=orderOut, append=count ? true : false);
+
+        nextVtkSaveTime += vtkSaveEachTime;
+    }
+
+    // --- 2. Mass-loss time series ------------------------------------------
+    if (mpirank == 0)
+    {
+        real massLossPct = (initialVolume - currentVolumeGlob) / initialVolume * 100.0;
+        string massFile = resultsFilename;
+
+        if (count == 0) {
+            ofstream f(massFile);
+            f << "TimeHours\tMassLossPercent\n";
+            f << t << "\t" << massLossPct << endl;
+        } else {
+            ofstream f(massFile, append);
+            f << t << "\t" << massLossPct << endl;
+        }
+
+        // Diagnostic companion file (see the smoothed-volume comment above):
+        // same quantity measured with a continuous Heaviside, so slow
+        // dissolution is visible instead of quantized onto plateaus.
+        string smoothFile = resultsFolder + "/mass_loss_smooth.txt";
+        if (count == 0) {
+            ofstream g(smoothFile);
+            g << "TimeHours\tSmoothVolume\tSmoothMassLossPercent\n";
+            smoothVolInit = smoothVolGlob;
+            g << t << "\t" << smoothVolGlob << "\t" << 0.0 << endl;
+        } else {
+            ofstream g(smoothFile, append);
+            real smoothPct = (smoothVolInit > 1e-12)
+                             ? (smoothVolInit - smoothVolGlob) / smoothVolInit * 100.0 : 0.0;
+            g << t << "\t" << smoothVolGlob << "\t" << smoothPct << endl;
+        }
+    }
+
+    // --- 3. Mechanism diagnostics (concentrations, film, area, extremes) --
+    real totalZnLoc, totalClLoc, totalOHLoc, totalO2Loc, totalFilmLoc;
+    real liquidVolLoc;
+
+    real maxZnLoc = Zn[].max;
+    real maxOHLoc = OH[].max; // pH = 14 + log10(OH)
+    real minO2Loc = O2[].min;
+
+    real surfaceAreaLoc = int2d(Mesh, levelset=phi)(1.0);
+
+    IFMACRO(intN)
+        totalZnLoc = intN(MeshNoOverlap)(Zn);
+        totalClLoc = intN(MeshNoOverlap)(Cl);
+        totalOHLoc = intN(MeshNoOverlap)(OH);
+        totalO2Loc = intN(MeshNoOverlap)(O2);
+        totalFilmLoc = intN(MeshNoOverlap)(F);
+        liquidVolLoc = intN(MeshNoOverlap)((phi <= 0) * 1.0);
+    ENDIFMACRO
+    IFMACRO(!intN)
+        totalZnLoc = int3d(MeshNoOverlap)(Zn);
+        totalClLoc = int3d(MeshNoOverlap)(Cl);
+        totalOHLoc = int3d(MeshNoOverlap)(OH);
+        totalO2Loc = int3d(MeshNoOverlap)(O2);
+        totalFilmLoc = int3d(MeshNoOverlap)(F);
+        liquidVolLoc = int3d(MeshNoOverlap)((phi <= 0) * 1.0);
+    ENDIFMACRO
+
+    real totalZnGlob=0, totalClGlob=0, totalOHGlob=0, totalO2Glob=0, totalFilmGlob=0, liquidVolGlob=0, surfaceAreaGlob=0;
+    mpiAllReduce(totalZnLoc, totalZnGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(totalClLoc, totalClGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(totalOHLoc, totalOHGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(totalO2Loc, totalO2Glob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(totalFilmLoc, totalFilmGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(liquidVolLoc, liquidVolGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(surfaceAreaLoc, surfaceAreaGlob, mpiCommWorld, mpiSUM);
+
+    real maxZnGlob=0, maxOHGlob=0, minO2Glob=0;
+    mpiAllReduce(maxZnLoc, maxZnGlob, mpiCommWorld, mpiMAX);
+    mpiAllReduce(maxOHLoc, maxOHGlob, mpiCommWorld, mpiMAX);
+    mpiAllReduce(minO2Loc, minO2Glob, mpiCommWorld, mpiMIN);
+
+    if (mpirank == 0)
+    {
+        real vol = (liquidVolGlob > 1e-9) ? liquidVolGlob : 1.0;
+        real avgZn = totalZnGlob / vol;
+        real avgCl = totalClGlob / vol;
+        real avgOH = totalOHGlob / vol;
+        real avgO2 = totalO2Glob / vol;
+
+        string mechFile = resultsFolder + "/mechanism_data.txt";
+
+        if (count == 0) {
+            ofstream f(mechFile);
+            f << "TimeHours\tLiquidVol\tSurfaceArea\tAvgZn\tAvgCl\tAvgOH\tAvgO2\tTotalFilm\tMaxZn\tMaxOH\tMinO2\n";
+            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << endl;
+        } else {
+            ofstream f(mechFile, append);
+            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << endl;
+        }
+    }
+}
+
+ENDIFMACRO//
