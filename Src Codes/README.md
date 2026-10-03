@@ -69,7 +69,7 @@ Src Codes/
 settings → helpers → mesh → fields → equations → Stefan init → initial
 state → time loop), so it doubles as a map of how the solver actually runs.
 
-Calibration/sensitivity scripts now live in [`../scripts/`](../scripts/)
+Calibration/sensitivity scripts now live in [`../Scripts/`](../Scripts/)
 at the repo root (a sibling of `Src Codes/`, not a subfolder of it) — see that
 folder's section below.
 
@@ -229,7 +229,7 @@ one, to run the solver.
 
 ## Calibration and Analysis Tools
 
-The root-level [`../scripts/`](../scripts/) directory (a sibling of
+The root-level [`../Scripts/`](../Scripts/) directory (a sibling of
 `Src Codes/`, not a subfolder of it — see its own section in the main repo
 README) contains workflows for parameter estimation, optimization, and
 uncertainty analysis. All scripts drive `dissolve.edp` directly via subprocess
@@ -257,13 +257,13 @@ below is the provided tool for recalibrating `kf`/`kd`/`kORR` against new data.
   (`bayes_opt`) over the same three parameters, with early stopping, a
   multi-fidelity coarse→fine correction factor, Random Forest parameter
   importance, GP surrogate landscape plots, and an HTML report. Needs
-  `../scripts/requirements.txt` installed (`bayes_opt`, `scikit-learn`,
+  `../Scripts/requirements.txt` installed (`bayes_opt`, `scikit-learn`,
   `rich`, etc. — not part of this project's core dependencies).
 - **`sensitivity_morris.py`** — Morris (Elementary Effects) global
   sensitivity screening (r = 20 trajectories, 180 runs, mass loss at 168 h) over 8 parameters (`k1`, `k2`, `k_orr`, `d_o2`,
   `initial_o2`, `d_zn`, `d_cl`, `d_oh`) via `SALib`, ranking each by its
   mean absolute effect (μ\*) on RMSE against experimental checkpoints.
-  Also needs `../scripts/requirements.txt`.
+  Also needs `../Scripts/requirements.txt`.
 
 ## Output and Visualization
 

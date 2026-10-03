@@ -1,4 +1,4 @@
-# scripts/
+# Scripts/
 
 Calibration, sensitivity and uncertainty tooling for the Dissolve solver.
 Install dependencies with `pip install -r requirements.txt`. The solver-driving
