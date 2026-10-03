@@ -40,7 +40,10 @@ varf oxygen(O2, wO2) =
 ;
 
 // --- Zn2+ transport ----------------------------------------------------------
-// dZn/dt + div(u Zn) = div(DeZn grad Zn) - fFormationRate + fDissolutionRate.
+// dZn/dt + div(u Zn) = div(DeZn grad Zn) + 2 kORR O2 delta_Gamma
+//                      - fFormationRate + fDissolutionRate   (paper Eq. 9;
+// the delta_Gamma term is the anodic Zn2+ release at the interface, tied to the
+// ORR by stoichiometry, 2 Zn per O2).
 // Zn is pinned to the saturation value znBoundaryConc wherever phi > 0 (inside the
 // still-solid scaffold) via a PENALTY penalty rather than a boundary-fitted
 // Dirichlet condition, since the solid/medium boundary moves every step.
@@ -53,6 +56,7 @@ varf zinc(Zn, wZn) =
   + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fDissolutionRate*wZn)
   + intN(Mesh, qfV=qfV1lump)((phi > 0)*PENALTY*Zn*wZn)
   + intN(Mesh, qfV=qfV1lump)((phi > 0)*PENALTY*znBoundaryConc*wZn)
+  + int2d(Mesh, levelset=phi)(2.0*kORR*O2*wZn)
 ;
 
 // --- Corrosion-product film state -------------------------------------------
@@ -78,16 +82,18 @@ varf chloride(Cl, wCl) =
 ;
 
 // --- OH- transport + sources -------------------------------------------------
-// Two production terms: chloride-driven film dissolution releases OH- along
-// with Zn2+, and the ORR produces 4 OH- per O2 consumed (see `oxygen` above
-// for the stoichiometry) -- both are surface/interface effects, so the ORR
-// term is again a levelset integral rather than volumetric.
+// dOH/dt = div(DeOH grad OH) + 4 kORR O2 delta_Gamma - 2 dF/dt  (paper Eq. 10),
+// with dF/dt = fFormationRate - fDissolutionRate. So: the ORR produces 4 OH- per
+// O2 consumed (a levelset surface integral, see `oxygen` above), film formation
+// consumes 2 OH- per Zn(OH)2/ZnO formed, and chloride-driven film dissolution
+// releases 2 OH- back (ZnO + H2O + 4Cl- -> ZnCl4^2- + 2OH-).
 varf hydroxide(OH, wOH) =
   intN(Mesh, qfV=qfV1lump, optimize=0)(OH/dt*wOH)
   + intN(Mesh, qfV=qfV1lump, optimize=0)(timeDerivMult*OHold/dt*wOH)
   + intN(Mesh)(DeOH*(dx(OH)*dx(wOH) + dy(OH)*dy(wOH) + dz(OH)*dz(wOH)))
   + intN(Mesh)(convectionMult*(phi <= 0)*convect([upx,upy,upz], -dt, OHold)*wOH/dt)
-  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fDissolutionRate*wOH)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*2.0*fDissolutionRate*wOH)
+  - intN(Mesh, qfV=qfV1lump)((phi <= 0)*2.0*fFormationRate*wOH)
   + int2d(Mesh, levelset=phi)(4.0*kORR*O2*wOH)
 ;
 

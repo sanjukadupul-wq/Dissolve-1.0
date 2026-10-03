@@ -149,9 +149,8 @@ mpirun -np 50 FreeFem++-mpi -nw dissolve.edp -v 0 \
   -results_file output/result.txt
 ```
 
-[`VALIDATION.md`](VALIDATION.md) documents the earlier, pre-paper development
-validation (different parameter set, coarser time step); read it for the
-history of the bug fixes, but the numbers there do not describe these defaults.
+[`VALIDATION.md`](VALIDATION.md) gives the validation results and the history of bug
+fixes; [`THEORY.md`](THEORY.md) lists the governing equations (paper Eqs. 6-17).
 
 ## Key Features
 

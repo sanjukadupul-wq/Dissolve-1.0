@@ -23,15 +23,29 @@ actions taken, and the current status of the solver.
 
 ### Current Validation Accuracy
 
-Validation against 28-day HBSS immersion data:
+Parameters: paper Table 2 (`kf` = 35.91, `kd` = 27.17, `kORR` = 0.51), calibrated
+on 14-day literature data (Liu et al., r-SBF; RMSE 0.042 %) and then applied
+unchanged to the 28-day HBSS immersion data measured in this study
+(Δt = 0.25 h, 18.9 M-element mesh, mean ± SD, n = 3):
 
-| Time (h) | Experimental | Model | Error |
-|---|---|---|---|
-| 24 | 0.045% | 0.049% | +10% |
-| 72 | 0.105% | 0.114% | +8% |
-| 168 | 0.209% | 0.188% | -10% |
-| 336 | 0.254% | 0.240% | -5% |
-| 672 | 0.310% | 0.333% | +8% |
+| Time (h) | Measured mass loss |
+|---|---|
+| 24 | 0.045 ± 0.016 % |
+| 72 | 0.105 ± 0.036 % |
+| 168 | 0.209 ± 0.061 % |
+| 336 | 0.254 ± 0.061 % |
+| 672 | 0.311 ± 0.115 % |
+
+Validation RMSE = **0.0159 %**, R² = **0.9734**. The simulated 672 h mass loss is
+0.333 % (parameter-uncertainty 95 % interval 0.315-0.375 %). Zn²⁺ and pH
+histories against Liu et al. give Pearson r = 0.96 and 0.95. Without recalibration,
+the six-crown stent loses about 6 % in 672 h, in the range reported in vivo (6-7 %).
+Mesh convergence: 18.9 M elements is within 0.87 % of the 21.25 M reference
+(7-day mass loss). Source data: `../Results/Computational/Computational_results.xlsx`.
+
+Note: the paper's equations now include the interface Zn²⁺ source
+(`+2 kORR C_O2 δΓ`) and the OH⁻ formation sink (`−2 ∂F/∂t`) that earlier
+versions of the solver omitted. Re-run any numbers produced before this change.
 
 ## Major Validation Findings
 
@@ -95,8 +109,8 @@ total experimentally observed degradation.
 
 **Current Mitigation**
 
-Validated simulations use `-enable_redistance 0`, which disables periodic
-reinitialization.
+Paper simulations reinitialize every 1.0 h (Table S4, fast marching method); the
+volume loss of FreeFEM's `distance()` should be checked when reinitializing.
 
 **Current Assessment**
 
@@ -235,29 +249,32 @@ relative error**.
 
 ## Calibrated Configuration
 
-The following configuration produced the best agreement with experimental
-degradation data:
+These are the solver defaults in `config/settings.idp`:
 
 ```bash
--k_orr 0.25 -k_f 10 -k_d 39.22 -film_tortuosity 120 \
--enable_redistance 0 -vel_extension 1 -h_interface 0.05 -search_method 1
+-k_f 35.91 -k_d 27.17 -k_orr 0.51 -dt_hours 0.25 -redistance_interval 1.0
 ```
 
 ### Parameter Interpretation
 
 | Parameter | Primary Effect |
 |---|---|
-| `kORR` | Controls initial degradation rate and overall magnitude |
-| `k_f` | Controls passivation development and degradation deceleration |
-| `film_tortuosity` | Controls film transport resistance |
-| `k_d` | Minimal influence in the current validation regime |
+| `kORR` | Strongest control: initial degradation rate and overall magnitude; high values deepen O₂ depletion and deceleration |
+| `k_f` | Higher values grow the film faster and reduce mass loss |
+| `k_d` | Higher values dissolve the film faster, lowering coverage and raising mass loss |
+
+Morris sensitivity (mass loss at 168 h) ranks dissolved O₂ > kORR > kd > D_O2 > kf.
+The earlier configuration (`-k_orr 0.25 -k_f 10 -k_d 39.22 -film_tortuosity 120`,
+Δt = 4 h, redistancing off) belonged to a previous model version and is retired.
 
 ## Mesh Dependency
 
 **Status:** ⚠ Important Limitation
 
-The calibrated parameters are specific to the validation mesh and should not be
-assumed transferable to other mesh resolutions or geometries.
+The paper calibrates on a coarse disc mesh (0.80 M elements) and validates on
+a refined one (18.9 M); the same parameters were also used, unchanged, for the
+stent. Treat transfer to other meshes or geometries as something to verify, not
+assume.
 
 Observed behaviour includes:
 
