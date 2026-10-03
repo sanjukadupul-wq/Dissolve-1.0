@@ -1,0 +1,75 @@
+// io/export_geometry.idp
+// Periodically remeshes the interface and exports the scaffold's volume
+// and/or surface mesh (e.g., for downstream CAD/visualization use).
+
+IFMACRO(!idpExportGeometry)
+macro idpExportGeometry 1//
+
+if (exportGeometryMesh)
+{
+  if (t >= nextGeometryExportTime - dt/2)
+  {
+    // Skip the export at t=0 if requested, but always advance the timer
+    if (t > 1e-9)
+    {
+        if (mpirank == 0)
+          print("Exporting the scaffold mesh at t=" + t + " hours")
+
+        fespace SpaceBackup(MeshBackup, Pk);
+        SpaceBackup phiG, phiReduce;
+
+        phiTemp = phi;
+        phiTemp[] .*= A.D;
+
+        int[int] rst = restrict(SpaceP1, SpaceBackup, newToOldGlobal);
+
+        phiG = 0;
+        for[i, v : rst] phiG[][v] = phiTemp[][i];
+
+        phiReduce = 0;
+        mpiAllReduce(phiG[], phiReduce[], mpiCommWorld, mpiSUM);
+
+        if (mpirank == 0)
+        {
+          string resultsFolder;
+          if (emitVtkOutput)
+          {
+            resultsFolder = vtkFilePrefix(0:vtkFilePrefix.rfind("/"));
+          }
+          else
+          {
+            if (resultsFilename.rfind("/") >= 0)
+              resultsFolder = resultsFilename(0:resultsFilename.rfind("/"));
+            else
+              resultsFolder = "output";
+          }
+
+          print("-> Remeshing the interface...")
+          meshN MeshExport = mmg3d(MeshBackup, metric=phiReduce[], iso=1, ls=0, hausd=1, verbose=0);
+
+          if (exportVolume)
+          {
+            meshN MeshScaffold = trunc(MeshExport, region==2);
+            savemesh(MeshScaffold, resultsFolder + "/volumeScaffold-" + count + ".mesh");
+          }
+
+          if (exportSurface)
+          {
+            print("-> Separating the surface mesh...")
+
+            MeshExport = buildBdMesh(MeshExport);
+
+            meshS MeshS = MeshExport.Gamma;
+
+            MeshS = trunc(MeshS, region==10);
+            MeshS = mmgs(MeshS, hausd=1, verbose=0);
+            savemesh(MeshS, resultsFolder + "/surfaceScaffold-" + count + ".mesh");
+          }
+        }
+    }
+
+    nextGeometryExportTime += exportGeometryEachTime;
+  }
+}
+
+ENDIFMACRO//

@@ -1,0 +1,72 @@
+// state/initial_state.idp
+// Sets initial conditions for every field and prepares the solvers used in
+// the time loop.
+
+IFMACRO(!idpInitialState)
+macro idpInitialState 1//
+
+Zn = znBoundaryConc * (phi > 0);
+F = 0;
+Cl = cl0 * (phi <= 0);
+OH = oh0 * (phi <= 0);
+O2 = o2Initial * (phi <= 0);
+O2old = O2;
+
+[ux, uy, uz, p] = [1.0, 1.0, 1.0, 2.0];
+[upx, upy, upz, pp] = [0, 0, 0, 0];
+
+DeZn = diffZn;
+DeO2 = diffO2;
+DeCl = diffCl;
+DeOH = diffOH;
+nue = nu;
+
+if (!adaptMeshRuntime)
+{
+  hhh = hTriangle;
+  h = hhh[].min;
+  mpiAllReduce(h, h, mpiCommWorld, mpiMIN);
+}
+
+// h is the probe distance for the interface-velocity finite differences in
+// physics/interface_velocity.idp (dirx = -h*xphi/normgradphi, then fields are
+// sampled at x+dir and x+2*dir). This line used to be an unconditional
+// `h = 0.002;` that silently discarded the mesh-derived value computed just
+// above -- leaving that block as dead code and pinning the probe at 0.002mm
+// on every mesh. On the coarse mesh (~1mm elements) that is ~500x smaller
+// than one element, so both sample points fall inside the SAME element and
+// vO2Diff reads a sub-element interpolant slope rather than the real O2
+// boundary layer. Made configurable 2026-08-14 to test that; -1 keeps the
+// mesh-derived h from above. Default preserves the old value so existing
+// runs are unchanged until this is deliberately changed.
+real hInterfaceOverride = getARGV("-h_interface", 0.002);
+if (hInterfaceOverride > 0)
+  h = hInterfaceOverride;
+if (mpirank == 0)
+  print("Interface probe distance h = " + h + " mm  (mesh hmin was " + hhh[].min + ")");
+
+loc = intN(MeshNoOverlap)(scaffold);
+glob = 0;
+mpiAllReduce(loc, glob, mpiCommWorld, mpiSUM);
+initialVolume = glob;
+prevScaffoldSize = initialVolume;
+
+loc = int2d(MeshNoOverlap, levelset=phi)(1.);
+glob = 0;
+mpiAllReduce(loc, glob, mpiCommWorld, mpiSUM);
+real initialSurfaceArea = glob;
+
+conv = 0;
+
+redistanceInterval = redistanceInterval >= dt ? redistanceInterval : dt;
+
+// znDensity (g/mm^3), not znMolarConc (mol/mm^3) -- calculateAlpha's cSol/cSat must
+// share units (both compared against znBoundaryConc, g/mm^3). Currently dead code
+// (alpha is computed but never read downstream), fixed anyway for whenever
+// that changes -- see state/fields.idp's velocityDenom for the same bug, live there.
+alpha = calculateAlpha(0, znDensity, znBoundaryConc, diffZn);
+
+set(A, sparams = petscAParams);
+set(NS, sparams = petscNsParams, fields = ux[], names = names);
+
+ENDIFMACRO//

@@ -1,0 +1,107 @@
+// state/fields.idp
+// Declares every finite-element field, scratch variable, and bookkeeping
+// scalar carried through the simulation.
+
+IFMACRO(!idpFields)
+macro idpFields 1//
+
+SpaceP0 scaffold = (phi > 0);
+
+// Species concentrations and corrosion-product film fraction
+SpaceP1 Zn;
+SpaceP1 F;
+SpaceP1 Cl;
+SpaceP1 OH;
+SpaceP1 O2;
+
+// Interface velocity working fields
+SpaceP1 v;
+SpaceP1 vZn;
+SpaceP1 vO2;
+// vO2React/vO2Diff MUST be SpaceP1 (per-node fields), not plain `real` --
+// a `real x = expr(x,y,z);` assignment is evaluated ONCE, using whatever
+// x,y,z are left over from the previous per-node Vh loop (an arbitrary
+// mesh point, not "the current point"). That was the actual bug found
+// 2026-08-14: vO2 = max(vO2React, vO2Diff) collapsed to ONE broadcast
+// scalar across the whole domain instead of the intended per-point
+// reaction-vs-diffusion competition -- see physics/interface_velocity.idp.
+SpaceP1 vO2React;
+SpaceP1 vO2Diff;
+
+SpaceP1 normgradphi;
+SpaceP1 xphi;
+SpaceP1 yphi;
+SpaceP1 zphi;
+
+SpaceP1 dirx;
+SpaceP1 diry;
+SpaceP1 dirz;
+// Second probe point for the interface-velocity finite differences. Was
+// implicit as 2*dirx, which is only correct when the probe offset is measured
+// from the NODE. With interface-relative probing (-vel_extension 1) the two
+// offsets are (phi+h) and (phi+2h), which are not a factor of 2 apart, so the
+// second probe needs its own vector. See physics/interface_velocity.idp.
+SpaceP1 dir2x;
+SpaceP1 dir2y;
+SpaceP1 dir2z;
+
+// Effective (film-modified) diffusivities
+SpaceP1 DeZn;
+SpaceP1 DeCl;
+SpaceP1 DeOH;
+SpaceP1 DeO2;
+
+// Previous-time-step values
+SpaceP1 Znold;
+SpaceP1 Fold;
+SpaceP1 Clold;
+SpaceP1 OHold;
+SpaceP1 O2old;
+SpaceP1 phiold;
+
+// Fluid velocity / pressure (current and previous step)
+SpaceVector [ux, uy, uz, p];
+SpaceVector [upx, upy, upz, pp];
+
+SpaceP0 nue;
+
+SpaceP1 hhh;
+real h;
+
+// Stefan-condition mass-balance denominator: (solid Zn density) - (Zn
+// saturation conc at the interface). Both terms MUST be in the same units
+// as the Zn field itself (g/mm^3, matching znBoundaryConc -- see state/initial_state.idp's
+// `Zn = znBoundaryConc * (phi > 0)`). Was `znMolarConc` (mol/mm^3, a UNIT MISMATCH found
+// 2026-08-14 while investigating kf/kd insensitivity) -- znDensity (g/mm^3) is
+// the physically correct term; znMolarConc stays reserved for the O2-reaction
+// velocity formulas below, which are molar and don't involve this subtraction.
+// Reference smoothed volume at t=0, for io/write_results.idp's diagnostic
+// mass_loss_smooth.txt (declared here so it persists across timesteps).
+real smoothVolInit = 0;
+
+real velocityDenom = 1 / (znDensity - znBoundaryConc);
+real initialVolume;
+real alpha;
+
+real scaffoldSize;
+real prevScaffoldSize;
+real scaffoldChangePct;
+int changed = 0;
+
+real conv;
+real count = 0;
+real nextRedistanceTime = redistanceInterval;
+real nextGeometryExportTime = 0;
+real nextVtkSaveTime = 0;
+real nextCheckpointTime = 0;
+real restartT = 0;  // loop start time -- 0 for cold start, set by checkpoint_read.idp on restart
+real cpuTime;
+real glob, loc;
+
+int[int] orderOut = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+
+int timeDerivMult = enableFlowSolve ? 0 : 1;
+int convectionMult = enableFlowSolve ? 1 : 0;
+int nsEnableMult = enableFullNavierStokes ? 1 : 0;
+
+ENDIFMACRO//
