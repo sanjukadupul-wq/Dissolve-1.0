@@ -30,8 +30,8 @@ separately): pandas, numpy, matplotlib, seaborn (optional), scikit-learn,
 bayes_opt (`pip install bayesian-optimization`), rich, psutil (optional).
 
 Usage (run from Src Codes/, with a mesh available -- see MESH_FILE below):
-    python3 calibration/calibrate_bayesian.py
-    CALIB_LAUNCHER=m3 python3 calibration/calibrate_bayesian.py   # on an M3 SLURM job
+    python3 scripts/BO/calibrate_bayesian.py
+    CALIB_LAUNCHER=m3 python3 scripts/BO/calibrate_bayesian.py   # on an M3 SLURM job
 """
 
 import os
@@ -66,9 +66,9 @@ timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 # ---------------------------------------------------------------------------
 # Fixed run configuration
 # ---------------------------------------------------------------------------
-WORKDIR = Path(__file__).resolve().parent.parent / "Src Codes"  # solver root
-# (this script itself lives in Calibration/, a sibling of Src Codes/ -- moved
-# out of Src Codes/calibration/, hence the extra "/ Src Codes" here)
+WORKDIR = Path(__file__).resolve().parent.parent.parent / "Src Codes"  # solver root
+# (this script itself lives in scripts/BO/; scripts/ is a sibling of Src Codes/,
+# hence the three .parent hops and the extra "/ Src Codes" here)
 MESH_FILE = os.environ.get("CALIB_MESH", "cylinder_10x2_scaffold_in_box.mesh")  # supply this
 RESULTS_DIR = str(WORKDIR / "output_bo")
 SIMULATION_OUTPUT_FILE = str(WORKDIR / "output_bo" / "MassLoss.txt")

@@ -1,0 +1,13 @@
+# Experimental immersion-test mass-loss/corrosion-rate data for Zn-alloy
+# calibration. Source: DOI 10.1016/j.jmst.2018.05.005
+# Replaces the older DEFAULT_TARGET in calibrate_bo.py / calibrate_kinetics.py
+# (24/72/168/336/672h target) -- per explicit request, calibration now only
+# needs to match up to t=336h (this dataset's last timepoint), not 672h.
+t_hours,mass_loss_pct,corrosion_rate_mmpyr
+0,0.00,0.00000
+24,0.05,0.11866
+48,0.09,0.10786
+120,0.13,0.06258
+168,0.20,0.06884
+240,0.27,0.06513
+336,0.32,0.05518
