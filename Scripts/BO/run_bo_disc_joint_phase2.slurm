@@ -46,7 +46,7 @@ echo "Phase 2 run_id=$RUN_ID (array task $TID): k_f=$KF k_d=$KD k_orr=$KORR -> $
 srun --mpi=pmi2 singularity exec --bind /fs04 $SIF_PATH FreeFem++-mpi -nw dissolve.edp -v 0 \
     -input_mesh "disc_10x2_coarse_hmin0.5.mesh" \
     -dt_hours 4.0 -sim_duration 336.0 -save_interval 4.0 \
-    -k_orr "$KORR" -k_f "$KF" -k_d "$KD" -film_tortuosity 120.0 \
+    -k_orr "$KORR" -k_f "$KF" -k_d "$KD" -film_tortuosity 2.0 \
     -enable_redistance 0 -vel_extension 1 -h_interface 0.05 -search_method 1 \
     -checkpoint_each_time 24 -checkpoint_dir "$OUTDIR" \
     -results_file "$OUTDIR/result_disc.txt" \

@@ -10,8 +10,9 @@ scripts expect to be run from the repository root and call `Src Codes/dissolve.e
 | `GSA/` | `sensitivity_morris.py`: Morris global sensitivity analysis, and `run_gsa_full_v2.slurm`: the 180-run (r = 20 x 8 parameters) cluster array job. |
 | `Uncertainty/` | `compute_95ci.py`: post-hoc GP/bootstrap 95 % intervals from the 32 BO trials in `final_all_evaluations.txt` (taken from the paper's Figure 3b source data); needs no new FreeFEM runs. |
 
-The `generate_doe*.py` scripts and the `.slurm` files record the exact
-settings used when the calibration was run on the cluster (dt = 4 h, tortuosity
-120, 336 h). Those predate the paper's final solver defaults (see
-`Src Codes/README.md`); update the flags before re-running them against the
-current solver.
+The `generate_doe*.py` scripts and the `.slurm` files are the cluster job
+definitions used for the calibration. Film tortuosity is set to the paper's
+value (`-film_tortuosity 2.0`). They still carry cluster paths and the
+cluster-era numerical flags (dt = 4 h, 336 h, redistancing off); see
+`Src Codes/README.md` for the paper's current solver defaults before
+re-running them.

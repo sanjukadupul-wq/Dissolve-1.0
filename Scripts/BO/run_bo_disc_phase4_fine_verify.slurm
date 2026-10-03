@@ -29,7 +29,7 @@ mkdir -p bo_disc_coarse_joint/output_phase4_fine_verify/vtk
 srun --mpi=pmi2 singularity exec --bind /fs04 $SIF_PATH FreeFem++-mpi -nw dissolve.edp -v 0 \
     -input_mesh "disc_10x2_hmin0.25.mesh" \
     -dt_hours 4.0 -sim_duration 336.0 -save_interval 4.0 \
-    -k_orr 0.5075 -k_f 35.9058 -k_d 27.1696 -film_tortuosity 120.0 \
+    -k_orr 0.5075 -k_f 35.9058 -k_d 27.1696 -film_tortuosity 2.0 \
     -enable_redistance 0 -vel_extension 1 -h_interface 0.05 -search_method 1 \
     -checkpoint_each_time 24 -checkpoint_dir bo_disc_coarse_joint/output_phase4_fine_verify \
     -results_file "bo_disc_coarse_joint/output_phase4_fine_verify/result_disc.txt" \
