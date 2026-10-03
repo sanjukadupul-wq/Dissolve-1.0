@@ -197,18 +197,3 @@ This software is provided "as is", without warranty of any kind, express or impl
 including but not limited to warranties of merchantability, fitness for a particular
 purpose, or non-infringement. The authors shall not be liable for any claim, damages,
 or other liability arising from the use of the software.
-
-## Citation & Acknowledgement
-
-If Dissolve™ contributes to published research, technical reports, regulatory
-submissions, or product-development activities, please acknowledge the software using
-the recommended citation below.
-
-> Henaka Ariyarathna (2026). *Dissolve™: In-Silico Degradation Solver for
-> Biodegradable Metallic Implants.*
-
-Additional citation information and related publications will be provided through
-future software releases and documentation updates.
-
-If you use this code or data, please also cite the paper named at the top of this
-README. *(Full citation to be added once published.)*
