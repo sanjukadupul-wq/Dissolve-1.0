@@ -16,8 +16,8 @@ Requirements (not part of this project's core dependencies -- install
 separately): pandas, numpy, matplotlib, seaborn (optional), SALib, rich.
 
 Usage (run from Src Codes/, with a mesh available):
-    python3 scripts/GSA/sensitivity_morris.py
-    CALIB_LAUNCHER=m3 python3 scripts/GSA/sensitivity_morris.py   # on an M3 SLURM job
+    python3 Scripts/GSA/sensitivity_morris.py
+    CALIB_LAUNCHER=m3 python3 Scripts/GSA/sensitivity_morris.py   # on an M3 SLURM job
 
 Total simulations = r * (k + 1) = 20 * (8 + 1) = 180 runs.
 """
@@ -50,7 +50,7 @@ console = Console()
 # Fixed run configuration
 # ---------------------------------------------------------------------------
 WORKDIR = Path(__file__).resolve().parent.parent.parent / "Src Codes"  # solver root
-# (this script itself lives in scripts/GSA/; scripts/ is a sibling of Src Codes/,
+# (this script itself lives in Scripts/GSA/; Scripts/ is a sibling of Src Codes/,
 # hence the three .parent hops and the extra "/ Src Codes" here)
 MESH_FILE = os.environ.get("CALIB_MESH", "cylinder_10x2_scaffold_in_box.mesh")  # supply this
 

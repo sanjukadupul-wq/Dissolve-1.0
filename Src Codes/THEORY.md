@@ -1210,7 +1210,7 @@ promising regions of parameter space. Paper settings: 12-point Latin hypercube
 start, expected-improvement acquisition, 32 evaluations (optimum at iteration
 22), search ranges kf [1, 100], kd [5, 100], kORR [0.05, 5].
 
-Implementation: `../scripts/BO/calibrate_bayesian.py`
+Implementation: `../Scripts/BO/calibrate_bayesian.py`
 
 **Sensitivity Analysis**
 
@@ -1227,7 +1227,7 @@ degradation predictions. Paper settings: Morris elementary effects, 8 parameters
 r = 20 trajectories (180 runs), response = mass loss at 168 h. Ranking: dissolved
 O₂ concentration > kORR > kd > D_O2 > kf; Zn²⁺/Cl⁻/OH⁻ diffusivities negligible.
 
-Implementation: `../scripts/GSA/sensitivity_morris.py`
+Implementation: `../Scripts/GSA/sensitivity_morris.py`
 
 ### Calibration Metrics
 
@@ -1281,8 +1281,8 @@ The calibration framework can generate:
 ### Implementation
 
 ```text
-../scripts/BO/calibrate_bayesian.py
-../scripts/GSA/sensitivity_morris.py
+../Scripts/BO/calibrate_bayesian.py
+../Scripts/GSA/sensitivity_morris.py
 ```
 
 ### References
