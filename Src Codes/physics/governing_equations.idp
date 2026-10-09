@@ -14,7 +14,11 @@
 //   fFormationRate -- Zn is oxidized and locked into the film, throttled to
 //                      zero as the film saturates toward filmCapacity.
 //   fDissolutionRate -- the film is undercut by chloride attack, releasing
-//                      Zn2+ back into solution. Second order in local Cl-.
+//                      Zn2+ back into solution. Second order in local Cl-,
+//                      rescaled g/mm^3 -> mol/L via clMolarConv (see
+//                      config/settings.idp) so literature k_d values (which
+//                      assume molar Cl-) actually register -- fixed 2026-09-14,
+//                      same bug family as state/fields.idp's znMolarConc fix.
 // Every species/film varf below uses qfV=qfV1lump (backward Euler with a
 // lumped mass matrix) -- see the note above `shrink` for why that matters
 // for the level-set equation specifically.
@@ -23,8 +27,8 @@
 IFMACRO(!idpGoverningEquations)
 macro idpGoverningEquations 1//
 
-macro fFormationRate kf*Zn*(1.0 - F/filmCapacity) //EOM
-macro fDissolutionRate kd*F*Cl*Cl //EOM
+macro fFormationRate 1.0*(1 - filmMode)*kf*Zn*(1.0 - F/filmCapacity) //EOM
+macro fDissolutionRate kd*F*(clMolarConv*Cl)*(clMolarConv*Cl) //EOM
 
 // --- Oxygen transport + surface ORR sink ------------------------------------
 // dO2/dt + div(u O2) = div(DeO2 grad O2), with O2 consumed by the cathodic
@@ -35,15 +39,23 @@ varf oxygen(O2, wO2) =
   + intN(Mesh, qfV=qfV1lump, optimize=0)(timeDerivMult*O2old/dt*wO2)
   + intN(Mesh)(DeO2*(dx(O2)*dx(wO2) + dy(O2)*dy(wO2) + dz(O2)*dz(wO2)))
   + intN(Mesh)(convectionMult*(phi <= 0)*convect([upx,upy,upz], -dt, O2old)*wO2/dt)
-  + int2d(Mesh, levelset=phi)(kORR*O2*wO2)
+  + int2d(Mesh, levelset=phi)(kORR*sinkRatio*sinkMult*O2*wO2)
   + on(InletTag, O2=o2Initial)
 ;
 
 // --- Zn2+ transport ----------------------------------------------------------
-// dZn/dt + div(u Zn) = div(DeZn grad Zn) + 2 kORR O2 delta_Gamma
-//                      - fFormationRate + fDissolutionRate   (paper Eq. 9;
-// the delta_Gamma term is the anodic Zn2+ release at the interface, tied to the
-// ORR by stoichiometry, 2 Zn per O2).
+// dZn/dt + div(u Zn) = div(DeZn grad Zn) + 2*kORR*O2*deltaGamma - fFormationRate
+//   + fDissolutionRate. The 2*kORR*O2 surface term (added 2026-09-14, matching
+// supplementary Eq. S7a) is Zn2+ released stoichiometrically by the ORR
+// cathodic reaction (O2 + 2H2O + 4e- -> 4OH-, paired with Zn -> Zn2+ + 2e-:
+// 2 Zn per O2 consumed) -- same int2d(levelset=phi) construction already
+// used (and confirmed correct) for the ORR term in the oxygen/hydroxide
+// varfs below. NOTE: metal mass loss (MassLossPercent, the moving phi
+// interface) is computed independently via the Stefan-condition interface
+// velocity in physics/interface_velocity.idp, not from this Zn concentration
+// field -- this term affects the dissolved-Zn2+ concentration (and hence
+// fFormationRate = kf*Zn*(1-theta)) but does not double-count geometric
+// mass loss.
 // Zn is pinned to the saturation value znBoundaryConc wherever phi > 0 (inside the
 // still-solid scaffold) via a PENALTY penalty rather than a boundary-fitted
 // Dirichlet condition, since the solid/medium boundary moves every step.
@@ -52,11 +64,11 @@ varf zinc(Zn, wZn) =
   + intN(Mesh, qfV=qfV1lump, optimize=0)(timeDerivMult*Znold/dt*wZn)
   + intN(Mesh)(DeZn*(dx(Zn)*dx(wZn) + dy(Zn)*dy(wZn) + dz(Zn)*dz(wZn)))
   + intN(Mesh)(convectionMult*(phi <= 0)*convect([upx,upy,upz], -dt, Znold)*wZn/dt)
+  + int2d(Mesh, levelset=phi)((1 - conservative)*2.0*kORR*O2*wZn + conservative*znNetSource*wZn)
   + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fFormationRate*wZn)
   + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fDissolutionRate*wZn)
-  + intN(Mesh, qfV=qfV1lump)((phi > 0)*PENALTY*Zn*wZn)
-  + intN(Mesh, qfV=qfV1lump)((phi > 0)*PENALTY*znBoundaryConc*wZn)
-  + int2d(Mesh, levelset=phi)(2.0*kORR*O2*wZn)
+  + intN(Mesh, qfV=qfV1lump)((phi > 0)*PENALTY*(1 - conservative)*Zn*wZn)
+  + intN(Mesh, qfV=qfV1lump)((phi > 0)*PENALTY*(1 - conservative)*znBoundaryConc*wZn)
 ;
 
 // --- Corrosion-product film state -------------------------------------------
@@ -65,8 +77,8 @@ varf zinc(Zn, wZn) =
 varf film(F, wF) =
   intN(Mesh, qfV=qfV1lump, optimize=0)(F/dt*wF)
   + intN(Mesh, qfV=qfV1lump, optimize=0)(Fold/dt*wF)
-  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*kf*Zn*F/filmCapacity*wF)
-  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*kf*Zn*wF)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*(1 - filmMode)*kf*Zn*F/filmCapacity*wF)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*(1 - filmMode)*kf*Zn*wF)
   + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fDissolutionRate*wF)
 ;
 
@@ -82,19 +94,29 @@ varf chloride(Cl, wCl) =
 ;
 
 // --- OH- transport + sources -------------------------------------------------
-// dOH/dt = div(DeOH grad OH) + 4 kORR O2 delta_Gamma - 2 dF/dt  (paper Eq. 10),
-// with dF/dt = fFormationRate - fDissolutionRate. So: the ORR produces 4 OH- per
-// O2 consumed (a levelset surface integral, see `oxygen` above), film formation
-// consumes 2 OH- per Zn(OH)2/ZnO formed, and chloride-driven film dissolution
-// releases 2 OH- back (ZnO + H2O + 4Cl- -> ZnCl4^2- + 2OH-).
+// Three terms (corrected 2026-09-14 to match supplementary Eq. S8 -- the
+// previous version only had the dissolution term, at the wrong 1x
+// coefficient, and was missing the formation term entirely):
+//   -2*fFormationRate -- if the film is a Zn(OH)2-type corrosion product,
+//     forming it consumes 2 OH- per Zn locked into the film (same sign
+//     convention as Zn's own fFormationRate term above, which is
+//     documented/confirmed to subtract Zn -- applied here so formation
+//     also subtracts OH-).
+//   +2*fDissolutionRate -- chloride attack releases the OH- back (2 per Zn
+//     released, matching the 2x it was consumed by -- previously only 1x).
+//   +4*kORR*O2*deltaGamma -- the ORR produces 4 OH- per O2 consumed (see
+//     `oxygen` above for the stoichiometry) -- was already correct.
+// All three are surface/interface effects; the ORR term is a levelset
+// integral, the film terms use the diffuse-interface (phi<=0) volumetric
+// form matching Zn/film's own convention.
 varf hydroxide(OH, wOH) =
   intN(Mesh, qfV=qfV1lump, optimize=0)(OH/dt*wOH)
   + intN(Mesh, qfV=qfV1lump, optimize=0)(timeDerivMult*OHold/dt*wOH)
   + intN(Mesh)(DeOH*(dx(OH)*dx(wOH) + dy(OH)*dy(wOH) + dz(OH)*dz(wOH)))
   + intN(Mesh)(convectionMult*(phi <= 0)*convect([upx,upy,upz], -dt, OHold)*wOH/dt)
-  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*2.0*fDissolutionRate*wOH)
-  - intN(Mesh, qfV=qfV1lump)((phi <= 0)*2.0*fFormationRate*wOH)
-  + int2d(Mesh, levelset=phi)(4.0*kORR*O2*wOH)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*((1 - ohFix)*2.0 - ohFix*2.0e6/znMolarMass)*fFormationRate*wOH)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*((1 - ohFix)*2.0 + ohFix*2.0e6/znMolarMass)*fDissolutionRate*wOH)
+  + int2d(Mesh, levelset=phi)(((1 - ohFix)*4.0 + ohFix*4.0e6/o2MolarMass)*kORR*sinkRatio*sinkMult*O2*wOH)
 ;
 
 // --- Level-set advection of the solid/medium interface ----------------------

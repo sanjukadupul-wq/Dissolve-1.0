@@ -36,7 +36,21 @@ mpiAllReduce(currentVolumeLoc, currentVolumeGlob, mpiCommWorld, mpiSUM);
 // resultsFilename -- calibration/calibrate_kinetics.py parses that with a
 // strict `len(parts) == 2` check and would silently drop every row if a third
 // column appeared.
-real volSmoothEps = getARGV("-vol_smooth_eps", 0.05);   // mm
+// Root cause (2026-09-09): the 0.05mm default was sized as a safe margin
+// above the ~0.02mm hmin used by the original thin-strut lattice meshes
+// (2.5x). Session convention has since moved to hmin=0.1mm (stent-
+// matching resolution, all controlled-geometry/disc/SC/disc-family
+// meshes), so eps < hmin -- tanh(phi/eps) saturates within a fraction of
+// a single mesh element near the interface, and FreeFEM's quadrature
+// can't resolve that sharp a transition on an element coarser than the
+// transition width itself. Confirmed: SmoothMassLossPercent came out
+// 40-60x too high (e.g. 39.8% vs the correct 0.9% for G0_straight_wire)
+// -- not a fixed multiplicative bug (varies per-specimen), consistent
+// with a quadrature-resolution failure rather than a sign/domain error.
+// Fixed by keeping the same ~2.5x margin, now relative to hmin=0.1mm.
+// Still fully overridable via -vol_smooth_eps for any run using a
+// different (e.g. finer) mesh resolution.
+real volSmoothEps = getARGV("-vol_smooth_eps", 0.25);   // mm
 real smoothVolLoc;
 IFMACRO(intN)
     smoothVolLoc = intN(MeshNoOverlap)(0.5*(1.0 + tanh(phi/volSmoothEps)));
@@ -57,6 +71,8 @@ if (count % saveIntervalSteps == 0)
     if (emitVtkOutput && (t >= nextVtkSaveTime - dt/2))
     {
         if (mpirank == 0) cout << "Saving VTK file at t=" << t << "..." << endl;
+
+        waitForDiskSpace(resultsFolder);
 
         if (exportFlowField)
             savevtk(vtkFilePrefix+".vtu", Mesh, phi, Zn, F, Cl, OH, O2, ux, uy, uz, p,
@@ -108,9 +124,57 @@ if (count % saveIntervalSteps == 0)
 
     real maxZnLoc = Zn[].max;
     real maxOHLoc = OH[].max; // pH = 14 + log10(OH)
+    real minOHLoc = OH[].min;
     real minO2Loc = O2[].min;
+    real maxFilmLoc = F[].max;
 
     real surfaceAreaLoc = int2d(Mesh, levelset=phi)(1.0);
+
+    // Interface (surface-averaged) chemistry -- volume averages (AvgZn etc.
+    // below) dilute whatever is happening AT the reacting surface with the
+    // much larger bulk-liquid domain; these divide by SurfaceArea instead of
+    // LiquidVol, so they read what the interface itself actually sees.
+    real ZnIfaceLoc = int2d(Mesh, levelset=phi)(Zn);
+    real ClIfaceLoc = int2d(Mesh, levelset=phi)(Cl);
+    real OHIfaceLoc = int2d(Mesh, levelset=phi)(OH);
+    real O2IfaceLoc = int2d(Mesh, levelset=phi)(O2);
+    real FIfaceLoc = int2d(Mesh, levelset=phi)((1 - filmMode)*F + filmMode*theta*filmCapacity);   // film mode: theta*F_max so Film_Interface/F_max = coverage
+
+    // Film coverage: fraction of the interface AREA where the film has
+    // built up past half of local capacity -- distinct from AvgFilm/MaxFilm,
+    // which say nothing about how patchy vs. uniform that film is.
+    real filmCoverAreaLoc = int2d(Mesh, levelset=phi)((F/filmCapacity > 0.5));
+
+    // Interface-averaged mechanism velocities (mm/hour) + which branch is
+    // controlling, by AREA FRACTION of the interface (a lattice's interface
+    // can be part Zn-limited and part O2-limited at once, so a single
+    // domain-wide label would hide that -- report fractions, not one verdict).
+    // NOTE: v/vZn/vO2React/vO2Diff are computed in physics/interface_velocity.idp,
+    // which runs AFTER this file in the per-step include order (see dissolve.edp) --
+    // so these columns report the velocity that produced the CURRENT phi/state
+    // being written this row (i.e. one step "in arrears"), not a same-instant
+    // value. At count==0 that step hasn't happened yet at all, so v/vZn/vO2React/
+    // vO2Diff are still FreeFEM's zero-initialized default; handled as a special
+    // case below (DominantMechanism="NotYetComputed", velocities/CR read 0).
+    real vZnIfaceLoc = int2d(Mesh, levelset=phi)(vZn);
+    real vO2ReactIfaceLoc = int2d(Mesh, levelset=phi)(vO2React);
+    real vO2DiffIfaceLoc = int2d(Mesh, levelset=phi)(vO2Diff);
+    real vFinalIfaceLoc = int2d(Mesh, levelset=phi)(v);
+
+    // Exclusive 3-way area partition (each interface point counted in
+    // exactly one bucket): Zn-limited iff vZn is the largest (least
+    // negative) of the three; otherwise O2-reaction- or O2-diffusion-
+    // limited depending on which O2 branch wins. Written as
+    // "not-Zn-max" * "O2React-branch-wins", using the same inline 0/1
+    // indicator-field-expression style already used throughout this
+    // codebase (e.g. physics/interface_velocity.idp's znBindsLoc) -- NOT a
+    // sum of separate indicators, which would double-count the overlap and
+    // break the partition. (vZn>=vO2React)*(vZn>=vO2Diff) is an FE-field
+    // expression, not a scalar, so it cannot be hoisted into a `real` --
+    // it must stay inline inside each int2d(...) call.
+    real znLimAreaLoc = int2d(Mesh, levelset=phi)((vZn >= vO2React) * (vZn >= vO2Diff));
+    real o2ReactLimAreaLoc = int2d(Mesh, levelset=phi)((1.0 - (vZn >= vO2React) * (vZn >= vO2Diff)) * (vO2React >= vO2Diff));
+    real o2DiffLimAreaLoc = int2d(Mesh, levelset=phi)((1.0 - (vZn >= vO2React) * (vZn >= vO2Diff)) * (vO2React < vO2Diff));
 
     IFMACRO(intN)
         totalZnLoc = intN(MeshNoOverlap)(Zn);
@@ -138,10 +202,31 @@ if (count % saveIntervalSteps == 0)
     mpiAllReduce(liquidVolLoc, liquidVolGlob, mpiCommWorld, mpiSUM);
     mpiAllReduce(surfaceAreaLoc, surfaceAreaGlob, mpiCommWorld, mpiSUM);
 
-    real maxZnGlob=0, maxOHGlob=0, minO2Glob=0;
+    real maxZnGlob=0, maxOHGlob=0, minOHGlob=0, minO2Glob=0, maxFilmGlob=0;
     mpiAllReduce(maxZnLoc, maxZnGlob, mpiCommWorld, mpiMAX);
     mpiAllReduce(maxOHLoc, maxOHGlob, mpiCommWorld, mpiMAX);
+    mpiAllReduce(minOHLoc, minOHGlob, mpiCommWorld, mpiMIN);
     mpiAllReduce(minO2Loc, minO2Glob, mpiCommWorld, mpiMIN);
+    mpiAllReduce(maxFilmLoc, maxFilmGlob, mpiCommWorld, mpiMAX);
+
+    real ZnIfaceGlob=0, ClIfaceGlob=0, OHIfaceGlob=0, O2IfaceGlob=0, FIfaceGlob=0, filmCoverAreaGlob=0;
+    mpiAllReduce(ZnIfaceLoc, ZnIfaceGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(ClIfaceLoc, ClIfaceGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(OHIfaceLoc, OHIfaceGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(O2IfaceLoc, O2IfaceGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(FIfaceLoc, FIfaceGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(filmCoverAreaLoc, filmCoverAreaGlob, mpiCommWorld, mpiSUM);
+
+    real vZnIfaceGlob=0, vO2ReactIfaceGlob=0, vO2DiffIfaceGlob=0, vFinalIfaceGlob=0;
+    mpiAllReduce(vZnIfaceLoc, vZnIfaceGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(vO2ReactIfaceLoc, vO2ReactIfaceGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(vO2DiffIfaceLoc, vO2DiffIfaceGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(vFinalIfaceLoc, vFinalIfaceGlob, mpiCommWorld, mpiSUM);
+
+    real znLimAreaGlob=0, o2ReactLimAreaGlob=0, o2DiffLimAreaGlob=0;
+    mpiAllReduce(znLimAreaLoc, znLimAreaGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(o2ReactLimAreaLoc, o2ReactLimAreaGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(o2DiffLimAreaLoc, o2DiffLimAreaGlob, mpiCommWorld, mpiSUM);
 
     if (mpirank == 0)
     {
@@ -150,16 +235,94 @@ if (count % saveIntervalSteps == 0)
         real avgCl = totalClGlob / vol;
         real avgOH = totalOHGlob / vol;
         real avgO2 = totalO2Glob / vol;
+        real avgFilm = totalFilmGlob / vol;
+
+        real hoursPerYear = 24.0 * 365.25;
+        real velToCR = -hoursPerYear;   // v is negative (receding); flip sign to a positive rate
+
+        // --- Corrosion rate (mm/year) ------------------------------------
+        // Instantaneous: from the interface-averaged physical velocity field
+        // directly, so it is NOT subject to the redistancing volume-
+        // correction noise a volume-difference estimate would inherit.
+        // Average: cumulative, ASTM-G1-style (recession = volume lost /
+        // (original area x elapsed time)), normalized by the ORIGINAL
+        // surface area (standard convention) rather than the current one --
+        // reusing state/initial_state.idp's own `initialSurfaceArea`
+        // (computed once at t=0, before this file ever runs), not a new
+        // variable of the same name.
+        real area = (surfaceAreaGlob > 1e-9) ? surfaceAreaGlob : 1.0;
+        real instCR = (count == 0) ? 0.0 : (vFinalIfaceGlob / area) * velToCR;
+        real avgCR = (t > 1e-9 && initialSurfaceArea > 1e-9)
+                     ? ((initialVolume - currentVolumeGlob) / (initialSurfaceArea * t)) * hoursPerYear
+                     : 0.0;
+
+        // --- pH (from OH- in mol/L; oh0 default 2.51e-7 confirms this is
+        // already a molar concentration, not a normalized/scaled quantity) -
+        real ohFloor = 1e-14;
+        real avgPH = 14.0 + log10(max(avgOH, ohFloor));
+        real minPH = 14.0 + log10(max(minOHGlob, ohFloor));
+        real maxPH = 14.0 + log10(max(maxOHGlob, ohFloor));
+
+        // --- Interface (surface-averaged) chemistry -----------------------
+        real ZnIface = ZnIfaceGlob / area;
+        real ClIface = ClIfaceGlob / area;
+        real OHIface = OHIfaceGlob / area;
+        real O2Iface = O2IfaceGlob / area;
+        real FIface = FIfaceGlob / area;
+        real pHIface = 14.0 + log10(max(OHIface, ohFloor));
+        real filmCoveragePct = filmCoverAreaGlob / area * 100.0;
+
+        // --- Mechanism velocities + controlling-mechanism area fractions --
+        real vZnIface = (count == 0) ? 0.0 : vZnIfaceGlob / area;
+        real vO2ReactIface = (count == 0) ? 0.0 : vO2ReactIfaceGlob / area;
+        real vO2DiffIface = (count == 0) ? 0.0 : vO2DiffIfaceGlob / area;
+        real vFinalIface = (count == 0) ? 0.0 : vFinalIfaceGlob / area;
+
+        real znLimPct = (count == 0) ? 0.0 : znLimAreaGlob / area * 100.0;
+        real o2ReactLimPct = (count == 0) ? 0.0 : o2ReactLimAreaGlob / area * 100.0;
+        real o2DiffLimPct = (count == 0) ? 0.0 : o2DiffLimAreaGlob / area * 100.0;
+
+        string dominantMechanism;
+        if (count == 0)
+            dominantMechanism = "NotYetComputed";
+        else if (znLimPct >= o2ReactLimPct && znLimPct >= o2DiffLimPct)
+            dominantMechanism = "ZnDiffusionLimited";
+        else if (o2ReactLimPct >= o2DiffLimPct)
+            dominantMechanism = "O2ReactionLimited";
+        else
+            dominantMechanism = "O2DiffusionLimited";
 
         string mechFile = resultsFolder + "/mechanism_data.txt";
 
+        // Streamed via ofstream `<<` chaining (not string `+` concatenation)
+        // to match this file's own proven pattern for the massFile/smoothFile
+        // blocks above -- avoids relying on an untested real/string `+` mix
+        // across ~30 chained operands.
         if (count == 0) {
             ofstream f(mechFile);
-            f << "TimeHours\tLiquidVol\tSurfaceArea\tAvgZn\tAvgCl\tAvgOH\tAvgO2\tTotalFilm\tMaxZn\tMaxOH\tMinO2\n";
-            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << endl;
+            f << "TimeHours\tLiquidVol\tSurfaceArea\tAvgZn\tAvgCl\tAvgOH\tAvgO2\tTotalFilm\tMaxZn\tMaxOH\tMinO2\t"
+              << "SolidVolume\tCorrosionRate_Instantaneous_mm_per_year\tCorrosionRate_Average_mm_per_year\t"
+              << "AvgPH\tMinPH\tMaxPH\t"
+              << "Zn_Interface\tCl_Interface\tOH_Interface\tO2_Interface\tFilm_Interface\tpH_Interface\t"
+              << "AvgFilm\tMaxFilm\tFilmCoveragePercent\t"
+              << "vZn_Interface_mm_per_hr\tvO2React_Interface_mm_per_hr\tvO2Diff_Interface_mm_per_hr\tvFinal_Interface_mm_per_hr\t"
+              << "ZnLimitedPercent\tO2ReactLimitedPercent\tO2DiffLimitedPercent\tDominantMechanism\n";
+            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << "\t"
+              << currentVolumeGlob << "\t" << instCR << "\t" << avgCR << "\t"
+              << avgPH << "\t" << minPH << "\t" << maxPH << "\t"
+              << ZnIface << "\t" << ClIface << "\t" << OHIface << "\t" << O2Iface << "\t" << FIface << "\t" << pHIface << "\t"
+              << avgFilm << "\t" << maxFilmGlob << "\t" << filmCoveragePct << "\t"
+              << vZnIface << "\t" << vO2ReactIface << "\t" << vO2DiffIface << "\t" << vFinalIface << "\t"
+              << znLimPct << "\t" << o2ReactLimPct << "\t" << o2DiffLimPct << "\t" << dominantMechanism << endl;
         } else {
             ofstream f(mechFile, append);
-            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << endl;
+            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << "\t"
+              << currentVolumeGlob << "\t" << instCR << "\t" << avgCR << "\t"
+              << avgPH << "\t" << minPH << "\t" << maxPH << "\t"
+              << ZnIface << "\t" << ClIface << "\t" << OHIface << "\t" << O2Iface << "\t" << FIface << "\t" << pHIface << "\t"
+              << avgFilm << "\t" << maxFilmGlob << "\t" << filmCoveragePct << "\t"
+              << vZnIface << "\t" << vO2ReactIface << "\t" << vO2DiffIface << "\t" << vFinalIface << "\t"
+              << znLimPct << "\t" << o2ReactLimPct << "\t" << o2DiffLimPct << "\t" << dominantMechanism << endl;
         }
     }
 }

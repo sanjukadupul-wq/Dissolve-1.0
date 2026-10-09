@@ -57,6 +57,113 @@ if (enableRedistancing)
     // back onto the original mesh/space.
     real V2 = intN(MeshBackup)((phiG > 0));
 
+    // Volume correction (2026-09-02, hardened iterative version):
+    // distance() is not exactly volume-preserving -- confirmed real (not a
+    // measurement artifact) by cross-checking dV_distance against actual
+    // result.txt jumps: disc ~0.003-0.03%/call, gyroid's higher-curvature
+    // surface ~0.5%/call, both small per call but compounding over hundreds
+    // of calls in a 12-month run.
+    //
+    // The single-shot linear correction (epsilon = dV/surfaceArea, tried
+    // 2026-08-31) assumes shifting phi by a constant epsilon moves the
+    // zero-level-set by ~epsilon along its normal EVERYWHERE -- a first-
+    // order approximation that only holds when epsilon is small relative
+    // to local curvature. It is exact enough for smooth TPMS surfaces
+    // (gyroid, schwarz-P: 0% correction failure at every porosity tested,
+    // 2026-09-02 cross-topology sweep) but overshoots badly at strut/node
+    // lattice junctions (FCC, BCC), where local curvature is sharp -- FCC
+    // p70 retained only 22.6% of its true cumulative mass loss at the raw
+    // final timestep, BCC p70 only 58.7%. A medial-axis thickness check
+    // (2026-09-02) ruled out under-resolution as the cause: FCC/BCC p70
+    // struts are 0.24-0.36mm median thickness, comfortably above the
+    // 2*epsilon=0.15mm interface width, with only 0.1-0.4% of the
+    // structure genuinely thin -- concentrated at the sharp junctions.
+    // Gyroid p70 by contrast has thinner ridge features (20.8% below the
+    // same threshold) yet zero artifact, confirming curvature -- not
+    // thickness -- is what breaks the single linear shift.
+    //
+    // Fix: damped Newton fixed-point iteration, surface area recomputed
+    // every step (so the local linearization is redone at the current
+    // interface, not the pre-correction one), with a bracket-bisection
+    // fallback if Newton ever proposes a step that would leave a known
+    // sign-change bracket, and hard caps on both the per-step and the
+    // cumulative interface displacement so a bad case can never silently
+    // run away. (An earlier iterated/fixed-point version without these
+    // safety rails was validated 2026-08-31 -- job 59612283 -- reducing
+    // gyroid's residual another ~30-160x over the single-shot version;
+    // this block supersedes it.)
+    real Vtarget = volBeforeGlob;
+    real omega = 0.5;                  // relaxation factor
+    int  maxCorrSteps = 15;
+    real relTol = 1e-6;
+    real maxShiftPerStep = 0.20 * h;   // within the 0.10-0.25*h_local band
+    real maxTotalShift   = 3.0 * h;    // hard cap on cumulative displacement
+
+    real deltaTotal = 0.0;
+    real Vcur = V2;
+    real relResid = (abs(Vtarget) > 1e-12) ? abs(Vtarget - Vcur) / abs(Vtarget) : 0.0;
+
+    real bracketLo = 0.0, bracketHi = 0.0;
+    real residLo = 0.0, residHi = 0.0;
+    bool haveBracket = false;
+    bool capped = false;
+    bool converged = (relResid < relTol);
+    int corrStep = 0;
+
+    while (!converged && corrStep < maxCorrSteps && !capped)
+    {
+      real Acur = int2d(MeshBackup, levelset=phiG)(1.0);
+      real resid = Vtarget - Vcur;
+
+      real step = (Acur > 1e-9) ? (omega * resid / Acur) : 0.0;
+      if (step >  maxShiftPerStep) step =  maxShiftPerStep;
+      if (step < -maxShiftPerStep) step = -maxShiftPerStep;
+
+      real deltaTrial = deltaTotal + step;
+
+      // Newton step would leave the known bracket -> bisect instead
+      if (haveBracket && ((deltaTrial < bracketLo) || (deltaTrial > bracketHi)))
+        deltaTrial = 0.5 * (bracketLo + bracketHi);
+
+      if (deltaTrial >  maxTotalShift) { deltaTrial =  maxTotalShift; capped = true; }
+      if (deltaTrial < -maxTotalShift) { deltaTrial = -maxTotalShift; capped = true; }
+
+      phiG[] += (deltaTrial - deltaTotal);
+      deltaTotal = deltaTrial;
+      Vcur = intN(MeshBackup)((phiG > 0));
+      real residNew = Vtarget - Vcur;
+
+      // a sign change between the previous and new residual brackets the
+      // root; once bracketed, keep narrowing it regardless of what Newton
+      // proposes next
+      if (!haveBracket && (resid * residNew < 0.0))
+      {
+        bracketLo = min(deltaTotal - step, deltaTotal);
+        bracketHi = max(deltaTotal - step, deltaTotal);
+        residLo = resid; residHi = residNew;
+        haveBracket = true;
+      }
+      else if (haveBracket)
+      {
+        if ((residLo > 0) == (residNew > 0))
+          { bracketLo = deltaTotal; residLo = residNew; }
+        else
+          { bracketHi = deltaTotal; residHi = residNew; }
+      }
+
+      relResid = (abs(Vtarget) > 1e-12) ? abs(residNew) / abs(Vtarget) : 0.0;
+      converged = (relResid < relTol);
+      corrStep = corrStep + 1;
+    }
+
+    real V2corrected = Vcur;
+    real volCorrection = deltaTotal;   // cumulative shift, kept for the debug print below
+
+    if (mpirank == 0 && (!converged || capped))
+      cout << "WARNING_REDIST_CORRECTION_NOT_CONVERGED t=" << t
+           << " steps=" << corrStep << " relResid=" << relResid
+           << " deltaTotal=" << deltaTotal << " capped=" << capped << endl;
+
     phiReduce = phiG;
 
     // Return trip: EXACT index-based gather, not interpolation.
@@ -83,10 +190,13 @@ if (enableRedistancing)
     // Apples-to-apples check: measure the post-gather volume with the SAME
     // expression V0 used (direct `(phi>0)` quadrature on MeshNoOverlap),
     // not via the SpaceP0-projected `scaffold`. V0/V1/V2 all use direct
-    // indicator evaluation; `glob` below uses the P0 projection, so any
-    // V2->V3 gap may be a MEASUREMENT artifact (P0 projection vs
-    // quadrature on interface-straddling elements) rather than real lost
-    // volume -- which the identical pre/post index-gather results suggest.
+    // indicator evaluation; `glob` below uses the P0 projection -- kept
+    // ONLY as a diagnostic to show the gap, it is NOT real lost volume
+    // (confirmed 2026-08-30 by cross-checking against actual result.txt
+    // jumps, which use direct quadrature via write_results.idp and never
+    // went through `scaffold` at all) and must never be used to judge
+    // whether a run's mass-loss curve is trustworthy -- read dV_distance
+    // (now corrected to ~0, see the volCorrection block above) instead.
     real volAfterDirectLoc = intN(MeshNoOverlap)((phi > 0));
     real volAfterDirectGlob = 0;
     mpiAllReduce(volAfterDirectLoc, volAfterDirectGlob, mpiCommWorld, mpiSUM);
@@ -98,17 +208,25 @@ if (enableRedistancing)
 
     if (mpirank == 0) {
       cout << "DEBUG_REDIST_STAGES t=" << t
-           << " V0=" << volBeforeGlob << " V1=" << V1 << " V2=" << V2 << " V3=" << glob
-           << " V3direct=" << volAfterDirectGlob
+           << " V0=" << volBeforeGlob << " V1=" << V1 << " V2=" << V2
+           << " V2corrected=" << V2corrected << " volCorrection=" << volCorrection
+           << " corrSteps=" << corrStep << " corrConverged=" << converged
+           << " corrCapped=" << capped << " corrRelResid=" << relResid
+           << " V3=" << glob << " V3direct=" << volAfterDirectGlob
            << " dV_restrict=" << (V1 - volBeforeGlob)
            << " dV_distance=" << (V2 - V1)
-           << " dV_projectback_DIRECT=" << (volAfterDirectGlob - V2)
-           << " dV_P0projection=" << (glob - volAfterDirectGlob)
+           << " dV_distance_corrected=" << (V2corrected - V1)
+           << " dV_projectback_DIRECT=" << (volAfterDirectGlob - V2corrected)
+           << " dV_P0projection_DIAGNOSTIC_ONLY=" << (glob - volAfterDirectGlob)
            << endl;
-      real dV = glob - volBeforeGlob;
+      // Real per-call loss: direct quadrature, post volume-correction --
+      // matches what result.txt actually reports (write_results.idp uses
+      // the same direct-quadrature form). NOT `glob`/P0-projected -- see
+      // the note above.
+      real dV = volAfterDirectGlob - volBeforeGlob;
       real dVpct = (volBeforeGlob > 1e-12) ? (dV / volBeforeGlob * 100.0) : 0.0;
       cout << "DEBUG_REDIST t=" << t << " V_before=" << volBeforeGlob
-           << " V_after=" << glob << " dV=" << dV << " dV_pct=" << dVpct << endl;
+           << " V_after=" << volAfterDirectGlob << " dV=" << dV << " dV_pct=" << dVpct << endl;
     }
 
   }

@@ -15,6 +15,12 @@ include "config/settings.idp"
 // 3. Shared macros and helper functions
 include "utils/helpers.idp"
 
+// 3b. Disk-space guard for VTK/checkpoint writes (2026-09-08) -- pauses
+// before a write if the target filesystem is nearly full, instead of
+// silently producing a corrupted 0-byte file and continuing for hours.
+// See io/diskspace_guard.idp for the full incident writeup.
+include "io/diskspace_guard.idp"
+
 if (mpirank == 0)
 {
   printHeader();
@@ -112,6 +118,15 @@ for (real t = restartT; t < simDuration; t += dt)
     if (mpirank == 0) print("Initial volume (initialVolume): " + initialVolume);
   }
 
+  {
+    real o2SinkLoc = int2d(MeshNoOverlap, levelset=phi)(kORR*sinkRatio*O2);
+    real znSrcLoc  = int2d(MeshNoOverlap, levelset=phi)(znDensity*(-v));
+    real o2SinkGlob = 0, znSrcGlob = 0;
+    mpiAllReduce(o2SinkLoc, o2SinkGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(znSrcLoc, znSrcGlob, mpiCommWorld, mpiSUM);
+    if (t > 0) { o2SinkCum += o2SinkGlob*dt; znSrcCum += znSrcGlob*dt; }
+  }
+
   if (mpirank == 0)
   {
     real massZnLost = max(0.0, (initialVolume - scaffoldSize) * znDensity);
@@ -125,7 +140,7 @@ for (real t = restartT; t < simDuration; t += dt)
 
     printDivider;
     print("Time: " + t + "h  (" + formatDuration(t) + ")    Step: " + count
-    + "    O2 consumed (g): " + massO2Consumed)
+    + "    O2 consumed (g): " + massO2Consumed + "    O2sinkCum: " + o2SinkCum + "    ZnSrcCum: " + znSrcCum)
     print("Initial size: " + initialVolume + "    Current size: " + scaffoldSize
     + "    % change: " + pctChange)
     print("Wall-clock elapsed: " + formatDuration(wallElapsedH)
@@ -148,6 +163,32 @@ for (real t = restartT; t < simDuration; t += dt)
   include "physics/interface_velocity.idp"
   include "numerics/timestep_solver.idp"
   include "numerics/mesh_refinement.idp"
+
+  // optional medium renewal (see -medium_reset_hours)
+  if (mediumResetHours > 0.0)
+  {
+    if (nextResetTime > 1.0e29) nextResetTime = mediumResetHours;
+    if (t + dt >= nextResetTime - 1.0e-9)
+    {
+      real znLoc = 0;
+      IFMACRO(intN)
+        znLoc = intN(MeshNoOverlap)(Zn * (phi <= 0));
+      ENDIFMACRO
+      IFMACRO(!intN)
+        znLoc = int3d(MeshNoOverlap)(Zn * (phi <= 0));
+      ENDIFMACRO
+      real znGlob = 0;
+      mpiAllReduce(znLoc, znGlob, mpiCommWorld, mpiSUM);
+      znRemovedCum += znGlob;
+      Zn = Zn * (phi > 0);
+      Cl = cl0 * (phi <= 0);
+      OH = oh0 * (phi <= 0);
+      O2 = o2Initial * (phi <= 0);
+      O2old = O2;
+      if (mpirank == 0) cout << "MEDIUM_RESET at t=" << (t + dt) << " h  Zn_removed_this_renewal(g)=" << znGlob << "  Zn_removed_cum(g)=" << znRemovedCum << endl;
+      nextResetTime += mediumResetHours;
+    }
+  }
 
   // ============================================================================
   // ADAPTIVE TIME STEP: grow dt while the step we just took was "quiet"

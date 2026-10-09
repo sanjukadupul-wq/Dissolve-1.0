@@ -53,6 +53,26 @@ SpaceP1 phi = 0;
 SpaceP1 phiTemp;
 SpaceP1 mm;
 
+// Analytic-SDF workaround (2026-09-09): for a single thin filament-like
+// scaffold (e.g. the controlled-geometry curvature-isolation wires), the
+// built-in distance() plugin's far-field output is wrong -- confirmed via
+// direct comparison against a lattice run using the identical mesh/box
+// setup (FCC p30: far-field phi correctly deep-negative, mean -17.7; the
+// wire runs: far-field phi barely negative/sometimes positive, mean
+// ~-1.5, wrong even at t=0 before any redistancing). Root cause not fully
+// isolated (hypothesis: distance()'s mesh-connectivity-based propagation
+// struggles with a sparse, elongated 1D-like interface vs a lattice's
+// many strut segments distributed through the domain), but the effect on
+// SolidVolume/mass-loss is confirmed real and severe (t=0 SolidVolume
+// ~305mm^3 vs the true ~0.26mm^3 for G0_straight_wire). Workaround: when
+// -phi_is_distance_field 1 is passed, the loaded .sol is trusted as
+// ALREADY a true signed-distance field (computed externally from the
+// same analytic SDF used to build the STL, at this exact mesh's node
+// positions) and the distance() call below is skipped entirely. Off by
+// default -- every other run's .sol convention (raw L2-projected
+// indicator, ~[-0.5,0.5]) still needs distance() and is unaffected.
+int phiIsAlreadyDistance = getARGV("-phi_is_distance_field", 0);
+
 if (mpirank == 0)
 {
   if (loadMeshFromFile)
@@ -68,8 +88,33 @@ if (mpirank == 0)
       print("Detecting mesh regions (vectorized)...")
       meshN MeshScaffold = trunc(Mesh, region==scaffoldRegionTag);
 
-      // Assign 1.0 where region matches, 0.0 otherwise.
-      phi = (region == scaffoldRegionTag);
+      // Volume-weighted L2 projection of the per-element region indicator
+      // onto the continuous P1 space, in place of a direct P1 assignment
+      // ("phi = (region==tag)"). A direct assignment is ambiguous at any
+      // node shared by solid- and fluid-tagged elements: FreeFEM's nodal
+      // write for a discontinuous per-element expression just keeps
+      // whichever element it processed last for that node, not a
+      // volume-weighted vote. For a thick solid region that never matters
+      // (every neighbouring element agrees), but for a strut only 1-2
+      // elements wide -- as at high porosity, e.g. BCC p90 -- nearly every
+      // node along the strut IS one of these ambiguous boundary nodes, so
+      // the arbitrary single-element pick can flip enough interior-strut
+      // nodes to falsely pinch the strut in two. Confirmed 2026-09-09:
+      // BCC p90's initial phi field showed 165 disconnected solid
+      // fragments (largest only 3.75% of solid volume) despite both the
+      // source STL and the tagged volume mesh being a single connected
+      // piece. The projection below instead solves for the P1 field whose
+      // mass-matrix inner product against every test function matches the
+      // true per-element indicator -- every node's value becomes a proper
+      // volume-weighted average of its neighbouring elements' tags,
+      // rather than an arbitrary pick.
+      SpaceP0 phi0 = (region == scaffoldRegionTag);
+
+      varf vProjMass(u, v) = int3d(Mesh)(u*v);
+      varf vProjRhs(u, v) = int3d(Mesh)(phi0*v);
+      matrix projMass = vProjMass(SpaceP1, SpaceP1, solver=CG);
+      real[int] projRhs = vProjRhs(0, SpaceP1);
+      phi[] = projMass^-1 * projRhs;
 
       print("")
 
@@ -117,10 +162,14 @@ if (mpirank == 0)
   }
 }
 
-if (mpirank == 0)
+if (mpirank == 0 && !phiIsAlreadyDistance)
 {
   distance(Mesh, phi, phiTemp[]);
   phi = phiTemp;
+}
+else if (mpirank == 0)
+{
+  print("Skipping distance() -- phi loaded as an already-correct analytic signed-distance field.")
 }
 
 broadcast(processor(0), phi[]);

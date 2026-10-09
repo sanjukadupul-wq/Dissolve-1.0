@@ -10,7 +10,17 @@ if (adaptMeshRuntime)
 {
   if (mpirank == 0)
   {
-    scaffoldSize = intN(Mesh)(scaffold);
+    // Direct quadrature on (phi>0), NOT the P0-projected `scaffold` field
+    // (fixed 2026-08-31): scaffold = (phi>0) assigned into a P0/piecewise-
+    // constant space undercounts interface-straddling elements against a
+    // single representative point per element, which showed up as a
+    // measurement-only "loss" of up to ~5%/call in the redistancing
+    // diagnostics (see numerics/timestep_solver.idp's dV_P0projection) even
+    // though the real (direct-quadrature) volume was barely moving. This
+    // remesh trigger inherited the same imprecision since it also went
+    // through `scaffold` -- switched to match write_results.idp's already-
+    // correct direct-quadrature volume computation.
+    scaffoldSize = intN(Mesh)((phi > 0) * 1.0);
     scaffoldChangePct = abs(scaffoldSize - prevScaffoldSize) / prevScaffoldSize * 100;
 
     if (scaffoldChangePct > refineThresholdPct)
@@ -79,7 +89,8 @@ if (adaptMeshRuntime)
 
     scaffold = (phi > 0);
 
-    prevScaffoldSize = int3d(Mesh)(scaffold);
+    // Same direct-quadrature fix as above, kept consistent with scaffoldSize.
+    prevScaffoldSize = int3d(Mesh)((phi > 0) * 1.0);
 
     changed = 0;
   }

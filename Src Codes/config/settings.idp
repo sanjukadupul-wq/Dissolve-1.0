@@ -81,8 +81,7 @@ real meshHMin = getARGV("-mesh_h_min", 4e-2);
 real meshHMax = getARGV("-mesh_h_max", 0.8);
 
 // --- Time stepping (hours) ------------------------------------------------
-// Paper Table S4: dt = 0.25 h, level-set reinitialization every 1.0 h.
-real dt = getARGV("-dt_hours", 0.25);
+real dt = getARGV("-dt_hours", 1.0);
 
 real saveIntervalHours = getARGV("-save_interval", dt);
 real saveRatio = saveIntervalHours / dt;
@@ -119,17 +118,16 @@ real tau = getARGV("-film_tortuosity", 2.00);
 real eps = getARGV("-film_porosity", 0.25);
 real del = getARGV("-film_constrictivity", 1.);
 
-// --- Reaction kinetics (paper Table 2, optimized values) --------------------
-// kf [1/h], kd [mm^6/(g^2.h)], kORR [mm/h].
+// --- Reaction kinetics (1/hour and mm^3/(g.hour)) --------------------------
 // Renamed from k1/k2 to kf/kd (film FORMATION rate, film DEGRADATION rate)
 // to match the naming used in the paper figures. -k_f/-k_d are the current
 // flags; -k1/-k2 are no longer accepted.
-real kf = getARGV("-k_f", 35.91);
-real kd = getARGV("-k_d", 27.17);
+real kf = getARGV("-k_f", 125.18);
+real kd = getARGV("-k_d", 39.22);
 
 // --- Material densities (g/mm^3) --------------------------------------------
 real znDensity = getARGV("-rho_zn", 0.00714);
-real filmDensity = getARGV("-rho_film", 0.005606);
+real filmDensity = getARGV("-rho_film", 0.003998);
 real filmCapacityScale = getARGV("-film_capacity_scale", 1.);
 real filmCapacity = filmDensity * (1 - eps) * filmCapacityScale;
 
@@ -140,29 +138,81 @@ real znMolarConc = getARGV("-zn_molar_conc", 1.09e-4);  // mol/mm^3
 // was defined above but never referenced anywhere until this fix (2026-08-14) --
 // see state/fields.idp's velocityDenom and state/initial_state.idp's calculateAlpha call.
 real rhoZnSolid = znDensity;
-// [Zn]_sat = 10 mg/L (paper Table 1) = 1.00e-8 g/mm^3. Was 1.00e-5 (10 g/L,
-// a 1000x mg->g conversion error) until corrected against the paper (2026-09-08).
-real znBoundaryConc = getARGV("-zn_boundary_conc", 1.00e-8);        // g/mm^3
+real znBoundaryConc = getARGV("-zn_boundary_conc", 1.00e-5);        // g/mm^3
 
 // --- Diffusion coefficients (mm^2/hour) -------------------------------------
-// Paper Table 1 (37 degC), converted from mm^2/s to mm^2/h (x3600):
-// D_Zn=7.56e-4, D_Cl=2.16e-3, D_OH=5.60e-3, D_O2=2.60e-3 mm^2/s.
-real diffZn = getARGV("-diff_zn", 2.72);
-real diffCl = getARGV("-diff_cl", 7.78);
-real diffOH = getARGV("-diff_oh", 20.16);
-real diffO2 = getARGV("-diff_o2", 9.36);
+real diffZn = getARGV("-diff_zn", 3.38);
+real diffCl = getARGV("-diff_cl", 9.7);
+real diffOH = getARGV("-diff_oh", 25.45);
+real diffO2 = getARGV("-diff_o2", 10.8);
 
 // --- Initial species concentrations (g/mm^3) --------------------------------
 real cl0 = getARGV("-cl0", 5.043e-6);
-// Initial pH 7.40 (paper Table 1). The paper's pH definition (Eq. S2) uses
-// pKw = 14: pOH = 6.60 -> [OH-] = 10^-6.60 = 2.51e-7 mol/L = 4.27e-12 g/mm^3,
-// so the initial state reads back as pH 7.40 in post-processing.
-real oh0 = getARGV("-oh0", 4.27e-12);
+real oh0 = getARGV("-oh0", 2.51e-7);
 real o2Initial = getARGV("-o2_initial", 3.5e-9);
 
-// --- Oxygen reduction reaction (ORR) kinetics (mm/hour) ---------------------
-// First-order surface rate constant: flux = kORR*[O2] at the interface (paper Eq. 7).
-real kORR = getARGV("-k_orr", 0.51);
+// Cl- molar mass (g/mol), used only to rescale the Cl field (g/mm^3) to an
+// effective molar concentration (mol/L) inside the dissolution rate law
+// (physics/governing_equations.idp: fDissolutionRate). Literature k_d values
+// (see the Sep-2026 GSA parameter table) are reported against molar Cl-,
+// not mass density -- multiplying kd*F*Cl*Cl with raw g/mm^3 Cl (cl0 ~
+// 5e-6, i.e. Cl^2 ~ 2.5e-11) versus mol/L Cl (cl0*clMolarConv ~ 0.14
+// physiological, Cl^2 ~ 0.02) differs by ~8e8x -- almost exactly the gap
+// found empirically between the literature k_d range (1-50) and the k_d
+// value (~1e7-1e9) needed before the model shows ANY dissolution-driven
+// sensitivity (bisection job 60078946, Sep 2026). Second instance of the
+// same unit-mismatch bug family as the znMolarConc/znDensity fix in
+// state/fields.idp (2026-08-14, found during an earlier kf/kd-insensitivity
+// investigation) -- that fix addressed the Stefan-condition velocity term;
+// this one addresses the film dissolution rate term. Conversion: 1 g/mm^3
+// = 1e6 g/L, divided by molar mass (g/mol) gives mol/L.
+real clMolarMass = 35.45;                    // g/mol
+real clMolarConv = 1.0e6 / clMolarMass;      // (mol/L) per (g/mm^3), ~28,211
+
+// --- Oxygen reduction reaction (ORR) kinetics (1/hour) ----------------------
+
+// --- O2 mass -> molar conversion in the recession-velocity laws (v3 fix) --------
+// O2 is stored as a MASS concentration (g/mm^3) but [Zn]sol (znMolarConc) is molar (mol/mm^3).
+// The v2 velocity laws divided g/mm^3 by mol/mm^3 directly, i.e. were missing 1/M_O2, making the
+// recession velocity M_O2 (=32) times larger than the O2 actually consumed implies. With
+// -o2_molar_fix 1 (default here) O2 is converted to mol/mm^3 (divide by M_O2) before use in
+// vO2 init / vO2React / vO2Diff, so |v_ORR| = 2*kORR*C_O2[mol/mm3]/[Zn]sol as in manuscript Eq. 15.
+// -o2_molar_fix 0 reproduces the v2 behaviour exactly.
+real o2MolarMass = 31.998;                                // g/mol
+int  o2MolarFix  = getARGV("-o2_molar_fix", 1);
+real o2ToMolar   = o2MolarFix ? 1.0 / o2MolarMass : 1.0;  // multiply O2 [g/mm^3] by this in the velocity laws
+// v4: -conservative 1 makes the species sources follow the ACTUAL interface recession v (Zn released = rho_Zn*|v|, O2 consumed =
+// stoichiometric (M_O2/(2 M_Zn))*rho_Zn*|v|), removes the Zn Dirichlet reservoir inside the solid (Zn inventory = metal lost),
+// and replaces the Zn-Stefan branch of the min() by a solubility cap using znSat. -oh_fix 1 puts the OH- sources on a molar basis.
+// -conservative 1: sources follow v, min() rule kept (found to collapse: sink->0 => no gradient => v->0).
+// -conservative 2: v = v_ORR evaluated at the interface only. The Robin O2 sink already encodes the diffusion limit (O2 at the
+//   interface is depressed when supply is slow), so the min() is redundant; with v = v_ORR the O2 consumed, the Zn released and the
+//   metal lost are tied stoichiometrically by construction.
+int consMode = getARGV("-conservative", 0);
+int conservative = (consMode > 0);
+real znSat = getARGV("-zn_sat", 5.7e-8);         // g/mm^3 (57 mg/L), used only when conservative=1
+int ohFix = getARGV("-oh_fix", 0);
+// -film_mode 1 (needs -conservative 2): the corrosion-product film is an INTERFACE state theta in [0,1] (coverage), not a volumetric field.
+//   d(theta)/dt = k_f*rho_Zn*|v|/m_film*(1-theta) - k_d*theta*(Cl[mol/L])^2 ; m_film = filmCapacity*filmThick [g/mm^2 at theta = 1]
+//   k_f = fraction of the Zn released that precipitates in place (dimensionless); k_d [L^2 mol^-2 h^-1] as before.
+//   Zn source = rho_Zn*|v| - m_film*dtheta/dt (precipitated Zn withdrawn, dissolved film returned: Zn conserved exactly).
+//   The film blocks the ORR: k_ORR_eff = k_ORR*((1-theta) + theta*del*eps/tau) (same constriction/porosity/tortuosity factor as Eq. 12).
+int filmMode = getARGV("-film_mode", 0);
+real filmThick = getARGV("-film_thickness", 0.005);   // mm, film thickness at full coverage
+// Unit switches for the surface film (film_mode 1). -kf_rate_units 1: -k_f is a rate in 1/h, share = k_f*delta_f^2/D_Zn
+// (thin-film reduction: C_Zn at the surface = rho_Zn|v| delta_f/D_Zn). -kd_mass_units 1: -k_d is in mm^6 g^-2 h^-1 with Cl in g/mm^3
+// (internally divided by clMolarConv^2 because the dissolution term squares the molar Cl).
+int kfRateUnits = getARGV("-kf_rate_units", 0);
+int kdMassUnits = getARGV("-kd_mass_units", 0);
+real kfShare = kfRateUnits ? kf*filmThick*filmThick/diffZn : kf;
+real kdUse = kdMassUnits ? kd/(clMolarConv*clMolarConv) : kd;
+// -medium_reset_hours H (>0): every H hours the electrolyte is renewed -- dissolved Zn -> 0, Cl and OH back to their initial values, O2 back to the
+// saturation value (all in the liquid); the metal and the surface film (theta / F) are NOT touched. The Zn removed is accumulated in znRemovedCum.
+real mediumResetHours = getARGV("-medium_reset_hours", 0.0);
+real filmMolarMass = 81.38;                              // g/mol (ZnO-type film)
+real filmMass = filmCapacity * filmThick * 65.38 / filmMolarMass;   // Zn-equivalent mass per area at theta = 1 [g Zn/mm^2] = Gamma_f*M_Zn
+real znMolarMass = 65.38;                        // g/mol
+real kORR = getARGV("-k_orr", 0.0144);
 int useORR = getARGV("-use_orr", 1);
 
 // O2 under-relaxation, applied in numerics/timestep_solver.idp as

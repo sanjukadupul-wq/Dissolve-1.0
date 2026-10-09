@@ -17,6 +17,12 @@ SpaceP1 O2;
 // Interface velocity working fields
 SpaceP1 v;
 SpaceP1 vZn;
+SpaceP1 theta = 0.0;          // v4 surface-film coverage
+SpaceP1 thetaOld = 0.0;
+SpaceP1 sinkMult = 1.0;       // film blocking factor on the ORR
+SpaceP1 znNetSource = 0.0;    // g/mm^2/h, Zn injected at the interface (net of precipitation)
+SpaceP1 sinkRatio = 1.0;   // v4: |v|/|v_ORR| in [0,1]; scales the ORR sink so O2 consumed matches the recession applied
+
 SpaceP1 vO2;
 // vO2React/vO2Diff MUST be SpaceP1 (per-node fields), not plain `real` --
 // a `real x = expr(x,y,z);` assignment is evaluated ONCE, using whatever
@@ -78,6 +84,10 @@ real h;
 // Reference smoothed volume at t=0, for io/write_results.idp's diagnostic
 // mass_loss_smooth.txt (declared here so it persists across timesteps).
 real smoothVolInit = 0;
+real znRemovedCum = 0;   // g of dissolved Zn discarded by the medium renewals
+real nextResetTime = 1.0e30;
+real o2SinkCum = 0;   // v4 diagnostic: cumulative O2 removed by the ORR sink (g), int2d(kORR*sinkRatio*O2) dt
+real znSrcCum = 0;    // v4 diagnostic: cumulative Zn injected by the interface source (g), int2d(rho_Zn*(-v)) dt (conservative mode)
 
 real velocityDenom = 1 / (znDensity - znBoundaryConc);
 real initialVolume;

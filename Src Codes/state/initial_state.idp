@@ -5,7 +5,7 @@
 IFMACRO(!idpInitialState)
 macro idpInitialState 1//
 
-Zn = znBoundaryConc * (phi > 0);
+Zn = znBoundaryConc * (phi > 0) * (1 - conservative);
 F = 0;
 Cl = cl0 * (phi <= 0);
 OH = oh0 * (phi <= 0);

@@ -24,6 +24,8 @@ if (t >= nextCheckpointTime)
 {
   if (mpirank == 0) print("Writing checkpoint at t=" + t + "h...");
 
+  waitForDiskSpace(checkpointDir);
+
   fespace SpaceBackup(MeshBackup, Pk);
   SpaceBackup ckptFieldG, ckptFieldReduce;
   int[int] ckptRst = restrict(SpaceP1, SpaceBackup, newToOldGlobal);

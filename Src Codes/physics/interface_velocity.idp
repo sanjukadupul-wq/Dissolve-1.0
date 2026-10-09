@@ -28,16 +28,18 @@ dir2x = -(velExt*phi + 2.0*h) * xphi / normgradphi;
 dir2y = -(velExt*phi + 2.0*h) * yphi / normgradphi;
 dir2z = -(velExt*phi + 2.0*h) * zphi / normgradphi;
 
-DeZn = diffZn * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau);
+DeZn = diffZn * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * ((1 - conservative) + conservative*(phi <= 0));
 DeCl = diffCl * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * (phi <= 0);
 DeOH = diffOH * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * (phi <= 0);
 DeO2 = diffO2 * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * (phi <= 0);
+sinkMult = (1.0 - filmMode*theta*(1.0 - del*eps/tau));
 if (t == 0)
 {
   // Reaction-limited initialization: use the reaction velocity at t=0
   // instead of the (undefined) Stefan/diffusion-limited velocity.
-  vO2 = -2.0 * kORR * O2(x+dirx, y+diry, z+dirz) / znMolarConc;
+  vO2 = -2.0 * kORR * sinkMult * o2ToMolar * O2(x+dirx, y+diry, z+dirz) / znMolarConc;
   v = vO2;
+  znNetSource = znDensity*(-v);
   if(mpirank==0 && x==0 && y==0) { cout << "DEBUG: reaction-limited init at t=0" << endl; }
 }
 else
@@ -58,12 +60,17 @@ else
         * DeZn(x+dirx, y+diry, z+dirz)
         * velocityDenom
         / h;
+  if (conservative)
+  {
+    // solubility cap: maximum recession if the interface were held at znSat and Zn diffused away over the probe distance h
+    vZn = -DeZn(x+dirx, y+diry, z+dirz) * max(znSat - Zn(x+dirx, y+diry, z+dirz), 0.0) / (h * (znDensity - znSat));
+  }
   vZn = min(vZn, 0.0);
 
   // O2: reaction-limited (kinetics). SpaceP1 field, not `real` -- must be
   // assigned via the same per-node Vh mechanism as vZn above, or this
   // silently becomes one arbitrary broadcast scalar (see fields.idp).
-  vO2React = -2.0 * kORR * O2(x+dirx, y+diry, z+dirz) / znMolarConc;
+  vO2React = -2.0 * kORR * sinkMult * o2ToMolar * O2(x+dirx, y+diry, z+dirz) / znMolarConc;
 
   // O2: diffusion-limited (Stefan approximation for O2 transport).
   //
@@ -82,7 +89,7 @@ else
   // -legacy_vo2diff_sign 1 restores the old (broken) sign for comparison.
   real vO2DiffSign = legacyVO2DiffSign ? -2.0 : 2.0;
   vO2Diff = vO2DiffSign * (O2(x+dirx, y+diry, z+dirz) - O2(x+dir2x, y+dir2y, z+dir2z))
-                 * DeO2(x+dirx, y+diry, z+dirz)
+                 * DeO2(x+dirx, y+diry, z+dirz) * o2ToMolar
                  / (znMolarConc * h);
   vO2Diff = min(vO2Diff, 0.0);
 
@@ -102,6 +109,29 @@ else
     v = max(vZn, vO2);
   else
     v = vO2;
+
+  if (consMode == 2)
+    v = vO2React;
+  znNetSource = znDensity*(-v);
+  if (filmMode)
+  {
+    thetaOld = theta;
+    SpaceP1 aRate = kfShare * znDensity * (-v) / filmMass;                          // growth rate if all released Zn precipitated (1/h)
+    SpaceP1 bRate = kdUse * (clMolarConv*Cl) * (clMolarConv*Cl);                  // dissolution (1/h)
+    theta = (thetaOld + dt*aRate) / (1.0 + dt*(aRate + bRate));
+    znNetSource = znDensity*(-v) - filmMass*(theta - thetaOld)/dt;
+    // the film is carried with the receding interface (semi-Lagrangian shift along the normal by the distance moved this step)
+    searchMethod = probeSearchMethod;
+    thetaOld = theta;
+    theta = thetaOld(x + v*dt*xphi/normgradphi, y + v*dt*yphi/normgradphi, z + v*dt*zphi/normgradphi);
+    searchMethod = 1;
+  }
+
+  // v4: ORR sink scaling so O2 consumed = stoichiometric amount for the recession actually applied (v >= vO2React, both <= 0)
+  if (consMode == 1)
+    sinkRatio = min(1.0, max(0.0, v / min(vO2React, -1.0e-30)));
+  else
+    sinkRatio = 1.0;
 
   // DIAGNOSTIC (-force_v <negative value>): overwrite the computed velocity
   // with a known uniform value near the interface. Separates "v is too small"

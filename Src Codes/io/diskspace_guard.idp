@@ -1,0 +1,144 @@
+// io/diskspace_guard.idp
+// ---------------------------------------------------------------------------
+// Root cause #2 (2026-09-09): the tmp file below was shared across all 16
+// MPI ranks of a job ("checkPath/.diskspace_guard_tmp.txt", no rank in the
+// name), each independently doing system("df ... > tmpFile") immediately
+// followed by ifstream-read of that same path -- an unsynchronized N-way
+// race on one file on a shared Lustre mount (/fs04), with no locking. Under
+// heavy concurrent load (many jobs' worth of 16-rank races going at once,
+// filesystem near-full for part of the day) this reliably corrupted the
+// read for one or more ranks, and FreeFEM's ifstream throws a hard
+// "Fatal Error: file not good in read array (Op_ReadKN)" for that failure
+// mode rather than failing open -- crashing those ranks while the survivors
+// hang on the next MPI collective (mpiBarrier below), so SLURM shows the
+// job as still RUNNING indefinitely with zero further progress. Confirmed
+// 2026-09-09 across ~11 of 12 concurrently-running jobs. Fixed by giving
+// each rank its own tmp file (suffixed with mpirank) -- eliminates the race
+// entirely instead of trying to make the shared-file access atomic.
+//
+// Root cause #1 (2026-09-08): three FCC array tasks ran for 12-14h each while
+// the shared /fs04/uj24 filesystem was completely full (0 bytes free, other
+// jobs' output filled it). savevtk()/savesol() are thin wrappers over a
+// plain ofstream-style write in FreeFEM's C++ plugin layer -- they do NOT
+// check the write's return code, so a disk-full condition doesn't raise a
+// FreeFEM-catchable error or stop the run. It just silently produces a
+// 0-byte file and the simulation carries on for hours, burning compute on a
+// run whose spatial output is now full of holes. Confirmed post-mortem: 65,
+// 15, and 63 zero-byte .vtu files (scattered through the trajectory, not
+// just "everything after some point"), and an empty checkpoint_state.txt on
+// two of the three runs -- i.e. neither the VTK history nor a resumable
+// checkpoint survived intact.
+//
+// Fix: a PRE-write guard, not a post-write catch. FreeFEM's savevtk/savesol
+// don't expose a per-rank success/failure signal, so retrying or verifying
+// after the fact would mean reverse-engineering the plugin's internal
+// per-rank filename convention (output_<npart>_<idx>_<rank>.vtu) -- fragile
+// and not attempted here. Instead: check free space on the target
+// filesystem BEFORE calling savevtk/savesol, and if it's below a safety
+// margin, PAUSE (loop: sleep, recheck) rather than write -- so a full disk
+// stalls the run cleanly and visibly in its own log instead of silently
+// corrupting output, and picks back up on its own once space is freed
+// (e.g. by clearing old output elsewhere on the same filesystem), no manual
+// restart needed.
+//
+// Every rank runs the same wait loop independently (df is instantaneous and
+// shared-filesystem-global, so all ranks converge within a few seconds of
+// each other) rather than have rank 0 poll and broadcast -- simpler, and
+// the trailing mpiBarrier below re-synchronizes them before the collective
+// write regardless of how they interleaved. Deliberately no wait ceiling by
+// default: per the intended behaviour (resume automatically once space is
+// cleared, not require a person to notice a crashed job and resubmit), the
+// loop waits indefinitely -- but prints a clear PAUSED line, then re-prints
+// every ~10 minutes, so a SLURM log never LOOKS hung even though it's
+// waiting. Pass -disk_guard_max_wait_min to add a real ceiling (fatal exit)
+// if that's ever wanted instead.
+
+IFMACRO(!idpDiskSpaceGuard)
+macro idpDiskSpaceGuard 1//
+
+real diskGuardMinFreeGB = getARGV("-min_disk_free_gb", 20.0);
+real diskGuardMaxWaitMin = getARGV("-disk_guard_max_wait_min", -1.0);  // -1 = wait forever
+
+// One df call is enough to check the whole filesystem regardless of which
+// subdirectory is passed in -- df resolves to the containing mount itself.
+//
+// Fails OPEN, deliberately: if `df` itself is missing/broken/permission-
+// denied, the redirected tmpFile is empty, `f >> freeGB` leaves freeGB at
+// its -1.0 default (standard istream behaviour: failed extraction doesn't
+// touch the target), and the caller's `dgFreeGB >= 0.0` loop guard then
+// treats that as "can't check, don't block" and proceeds with the write
+// unguarded -- the pre-2026-09-08 behaviour. A bug in the disk-space CHECK
+// itself must never be able to hang every future run forever; that would
+// trade one silent-corruption failure mode for a silent-hang one.
+func real diskGuardFreeGB(string checkPath, string tmpFile)
+{
+  system("df --output=avail -B1G " + checkPath + " 2>/dev/null | tail -1 > " + tmpFile);
+  real freeGB = -1.0;
+  ifstream f(tmpFile);
+  f >> freeGB;
+  return freeGB;
+}
+
+// checkPath: directory whose filesystem to check (checkpointDir or
+// resultsFolder -- both live on the same /fs04 mount here, but pass the
+// actual target so this stays correct if that ever changes).
+//
+// A func, not a macro, deliberately: every other macro in this codebase
+// (grad/div/Grad/print/printDivider/setCPUTime) is a short one-line-body
+// expression substitution. FreeFEM's macro preprocessor is a textual
+// substitution system, not a real language feature -- a loop this size
+// with nested if/else and inline comments inside a macro's {} body hit a
+// parser error (confirmed 2026-09-08, "syntax error ... before } token")
+// that a func with the identical body does not. funcs elsewhere in this
+// codebase (newtons, fileExists, printHeader) already use loops/comments/
+// try-catch freely, so this is the established safe pattern for anything
+// beyond a one-liner.
+func int waitForDiskSpace(string checkPath)
+{
+  string dgTmpFile = checkPath + "/.diskspace_guard_tmp_" + mpirank + ".txt";
+  real dgFreeGB = diskGuardFreeGB(checkPath, dgTmpFile);
+  real dgWaitedMin = 0.0;
+  bool dgWasPaused = false;
+
+  while (dgFreeGB >= 0.0 && dgFreeGB < diskGuardMinFreeGB)
+  {
+    dgWasPaused = true;
+    if (mpirank == 0)
+    {
+      if (dgWaitedMin == 0.0)
+        cout << "PAUSED: only " << dgFreeGB << "GB free on " << checkPath
+             << " (need " << diskGuardMinFreeGB << "GB) -- waiting for space to "
+             << "clear before writing VTK/checkpoint output. Not writing "
+             << "anything until this clears (2026-09-08 disk-full-corruption fix)."
+             << endl;
+      else if ((int(dgWaitedMin) % 10) == 0)
+        cout << "STILL PAUSED: " << dgFreeGB << "GB free (need " << diskGuardMinFreeGB
+             << "GB), waited " << dgWaitedMin << " min so far..." << endl;
+    }
+    if (diskGuardMaxWaitMin > 0.0 && dgWaitedMin >= diskGuardMaxWaitMin)
+    {
+      if (mpirank == 0)
+        cout << "FATAL: disk space did not clear within " << diskGuardMaxWaitMin
+             << " minutes (-disk_guard_max_wait_min) -- aborting rather than "
+             << "waiting forever." << endl;
+      mpiBarrier(mpiCommWorld);
+      exit(1);
+    }
+    system("sleep 60");
+    dgWaitedMin += 1.0;
+    dgFreeGB = diskGuardFreeGB(checkPath, dgTmpFile);
+  }
+
+  if (dgWasPaused && mpirank == 0)
+    cout << "RESUMED: " << dgFreeGB << "GB free on " << checkPath
+         << " -- proceeding with the write after pausing " << dgWaitedMin
+         << " min." << endl;
+
+  // Re-synchronize every rank before the collective savevtk/savesol call
+  // that follows, regardless of how each rank's independent polling loop
+  // interleaved.
+  mpiBarrier(mpiCommWorld);
+  return 0;
+}
+
+ENDIFMACRO//
