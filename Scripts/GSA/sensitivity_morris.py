@@ -3,14 +3,14 @@
 Morris (Elementary Effects) global sensitivity analysis of Dissolve's 8
 kinetic/transport parameters, run against the real dissolve.edp solver.
 
-Ported from the original BioDeg project's sensitivity_analysis.py to this
-repo's dissolve.edp CLI. The SALib problem definition (parameter names,
-bounds, num_vars) and Morris settings (trajectories, levels) are UNCHANGED
-from the original -- only flag names, the solver entry point, launcher
-command, and stdout-parsing patterns were updated to match the current
-codebase. See calibrate_bayesian.py's docstring for the full flag-mapping
-table (mesh/k1/k2/k_orr/final_time/time_step/redistance_time/save_each/
-output-file flags all map the same way here).
+Settings follow the Supporting Information: parameter ranges in Table S4 and
+the Morris design in Table S5 (SALib, p = 4 levels, r = 20 trajectories, 8
+parameters -> 180 model evaluations, response = mass loss after 168 h). The
+kinetic ranges are in the units of the current solver (k_f in h^-1, k_d in
+mm^6 g^-2 h^-1, k_ORR in mm h^-1), selected with the flags in V4_FLAGS below.
+See calibrate_bayesian.py's docstring for the flag-mapping table
+(mesh/k1/k2/k_orr/final_time/time_step/redistance_time/save_each/output-file
+flags all map the same way here).
 
 Requirements (not part of this project's core dependencies -- install
 separately): pandas, numpy, matplotlib, seaborn (optional), SALib, rich.
@@ -55,12 +55,17 @@ WORKDIR = Path(__file__).resolve().parent.parent.parent / "Src Codes"  # solver 
 MESH_FILE = os.environ.get("CALIB_MESH", "cylinder_10x2_scaffold_in_box.mesh")  # supply this
 
 CORES = int(os.environ.get("SLURM_NTASKS", os.environ.get("CALIB_NP", "8")))
-FINAL_TIME = 168.0      # response metric: mass loss after 168 h (paper Table S6)
-TIME_STEP = 0.25
+FINAL_TIME = 168.0      # response metric: mass loss after 168 h (Supporting Information Table S5)
+TIME_STEP = 0.25        # Supporting Information Table S3
 REDISTANCE_TIME = 1.0
 
-# Morris Method Settings (unchanged from the original)
-NUM_TRAJECTORIES = 20  # r=20 -> 20*(8+1) = 180 simulations (paper Table S6)
+# Morris Method Settings (Supporting Information Table S5)
+NUM_TRAJECTORIES = 20  # r=20 -> 20*(8+1) = 180 simulations
+NUM_LEVELS = 4         # p = 4
+
+# Solver switches for the current formulation (conservative interface coupling,
+# surface film, k_f / k_d in the units of Table S4).
+V4_FLAGS = ["-conservative", "2", "-film_mode", "1", "-kf_rate_units", "1", "-kd_mass_units", "1"]
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 RESULTS_DIR = str(WORKDIR / "output_sensitivity" / f"sensitivity_{timestamp}")
@@ -87,6 +92,7 @@ def build_command(k1, k2, k_orr, d_o2, initial_o2, d_zn, d_cl, d_oh):
         "-k_f", str(k1), "-k_d", str(k2), "-k_orr", str(k_orr),
         "-diff_o2", str(d_o2), "-o2_initial", str(initial_o2),
         "-diff_zn", str(d_zn), "-diff_cl", str(d_cl), "-diff_oh", str(d_oh),
+        *V4_FLAGS,
         "-sim_duration", str(FINAL_TIME), "-dt_hours", str(TIME_STEP),
         "-redistance_interval", str(REDISTANCE_TIME), "-save_interval", "24",
         "-results_file", out_rel,
@@ -115,19 +121,20 @@ if EXP_DATA.empty:
     console.print("[bold red]CRITICAL: No experimental checkpoints fall within FINAL_TIME. "
                    "RMSE would be computed against nothing.[/bold red]")
 
-# --- Define Problem (SALib format, UNCHANGED from the original) ---
+# --- Define Problem (SALib format; ranges from Supporting Information Table S4) ---
+# Diffusivities are in mm^2 h^-1 (Table S4 lists them in mm^2 s^-1: 1.39e-3 mm^2 s^-1 = 5.0 mm^2 h^-1).
 problem = {
     'num_vars': 8,
     'names': ['k1', 'k2', 'k_orr', 'd_o2', 'initial_o2', 'd_zn', 'd_cl', 'd_oh'],
     'bounds': [
-        [50.0, 200.0],      # k1  (kf, paper Table S5)
-        [1.0, 50.0],        # k2  (kd)
-        [0.1, 5.0],         # k_orr
-        [5.0, 20.0],        # d_o2
-        [1e-9, 1e-7],       # initial_o2
-        [1.5, 5.0],         # d_zn (Default 2.72)
-        [5.0, 15.0],        # d_cl (Default 7.78)
-        [15.0, 35.0]        # d_oh (Default 20.16)
+        [1e4, 8e5],         # k1  (k_f, film formation)       h^-1
+        [2e7, 4e8],         # k2  (k_d, film dissolution)     mm^6 g^-2 h^-1
+        [8.0, 800.0],       # k_orr                           mm h^-1
+        [5.0, 20.0],        # d_o2   (1.39e-3 - 5.56e-3 mm^2 s^-1)
+        [1e-9, 1e-8],       # initial_o2                      g mm^-3
+        [1.5, 5.0],         # d_zn   (4.17e-4 - 1.39e-3 mm^2 s^-1)
+        [5.0, 15.0],        # d_cl   (1.39e-3 - 4.17e-3 mm^2 s^-1)
+        [15.0, 35.0]        # d_oh   (4.17e-3 - 9.72e-3 mm^2 s^-1)
     ]
 }
 
@@ -243,7 +250,7 @@ def run_simulation(index, params):
 console.print(Panel.fit("[bold white]Sensitivity Analysis (Morris Method)[/bold white]", style="bold magenta"))
 
 # 1. Generate Samples: N = r * (D + 1)
-X = morris.sample(problem, NUM_TRAJECTORIES, num_levels=4)
+X = morris.sample(problem, NUM_TRAJECTORIES, num_levels=NUM_LEVELS)
 num_samples = len(X)
 console.print(f"Generated {num_samples} parameter sets (using {NUM_TRAJECTORIES} trajectories).")
 

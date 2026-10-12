@@ -115,14 +115,15 @@ except Exception as e:
 print(f"DEBUG: Using {CORES} cores for simulation.")
 
 # --- Optimization budget/targets (unchanged from the original) ---
-# Paper Table S10: 12-point initial design, 32 total evaluations, target RMSE 0.05%.
+# Supporting Information Table S9: 12-point Latin-hypercube initial design, expected improvement,
+# 32 total evaluations, random seed 1, target RMSE 0.05% (calibration data: Table S6).
 TOTAL_RUNS = 32
 MAX_TOTAL_RUNS = 32
 TARGET_RMSE = 0.05      # Research Grade Goal
 INIT_POINTS = 12
 
 FINAL_TIME = 336.0      # Matches largest calibration point
-TIME_STEP = 0.25        # 0.25h Time Step (paper Table S4)
+TIME_STEP = 0.25        # 0.25h Time Step (Supporting Information Table S3)
 REDISTANCE_TIME = 1.0   # 1h Redistance
 
 # ---------------------------------------------------------------------------
