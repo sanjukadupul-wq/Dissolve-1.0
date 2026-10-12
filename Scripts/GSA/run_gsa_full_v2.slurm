@@ -16,8 +16,8 @@
 # bounds) as the original run (job 60076785), but using the corrected
 # physics in /fs04/uj24/zinc_simulation_v2: the Cl molar-unit fix
 # (config/settings.idp clMolarConv, physics/governing_equations.idp
-# fDissolutionRate kd*F*(clMolarConv*Cl)^2) that made kd sensitive across
-# its literature range (validated: kd=1/25/50 now give 0.324/0.574/0.609%
+# fDissolutionRate k_d*F*(clMolarConv*Cl)^2) that made k_d sensitive across
+# its literature range (validated: k_d=1/25/50 now give 0.324/0.574/0.609%
 # mass loss instead of a flat 0.234% for all three -- job 60079264).
 # Running from the isolated copy, NOT /fs04/uj24/zinc_simulation (original,
 # unmodified, still used by the running curvature study job 60063760).
@@ -44,7 +44,7 @@ MESH="Cylinder/cylinder_10x2_DEBUG_coarse.mesh"
 OUTDIR="output_gsa_full_v2_run${TID}"
 mkdir -p "$OUTDIR"
 
-echo "Array task $TID (run_id=$RUN_ID): kf=$KF kd=$KD kORR=$KORR D_O2=$D_O2 C_O2_0=$C_O2_0 D_Zn=$D_ZN D_Cl=$D_CL D_OH=$D_OH -> $OUTDIR"
+echo "Array task $TID (run_id=$RUN_ID): k_f=$KF k_d=$KD k_ORR=$KORRD_O2=$D_O2 C_O2_0=$C_O2_0 D_Zn=$D_ZN D_Cl=$D_CL D_OH=$D_OH -> $OUTDIR"
 
 module load singularity
 SIF_PATH=~/software/freefem.sif

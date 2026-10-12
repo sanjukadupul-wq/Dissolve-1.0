@@ -134,7 +134,7 @@ meshes in a space-free directory.
 The defaults in `config/settings.idp` follow the paper ("A Mechanistic
 Framework for Predicting the Biodegradation of Zinc Implants"): Table 1
 material/film/initial conditions, Table 2 optimized kinetic parameters
-(`kf` = 35.91 h⁻¹, `kd` = 27.17 mm⁶ g⁻² h⁻¹, `kORR` = 0.51 mm h⁻¹) and the
+(k_f = 3×10⁵ h⁻¹, k_d = 1×10⁸ mm⁶ g⁻² h⁻¹, k_ORR = 80 mm h⁻¹, run with `-conservative 2 -film_mode 1 -kf_rate_units 1 -kd_mass_units 1`) and the
 Table S4 numerical settings (Δt = 0.25 h, level-set reinitialization every
 1.0 h, 30 × 30 × 30 mm electrolyte domain, 3.5 mg/L O₂ Dirichlet at the top
 surface). The calibrated values were fitted on the Ø10 × 2 mm disc and reused
@@ -174,9 +174,9 @@ Grouped by what each one actually controls, not by file.
 **Kinetics** (`config/settings.idp`)
 | flag | default | meaning |
 |---|---|---|
-| `-k_f` | 35.91 | film formation rate (h⁻¹) |
-| `-k_d` | 27.17 | chloride-driven film degradation rate (mm⁶ g⁻² h⁻¹) |
-| `-k_orr` | 0.51 | oxygen reduction reaction rate constant (mm h⁻¹) |
+| `-k_f` | 125.18 (paper: 3×10⁵) | film formation rate k_f (h⁻¹) |
+| `-k_d` | 39.22 (paper: 1×10⁸) | chloride-driven film degradation rate k_d (mm⁶ g⁻² h⁻¹) |
+| `-k_orr` | 0.0144 (paper: 80) | oxygen reduction reaction rate constant k_ORR (mm h⁻¹) |
 | `-film_tortuosity` | 2.0 | film tortuosity (diffusion-blocking strength) |
 | `-diff_zn`, `-diff_cl`, `-diff_oh`, `-diff_o2` | material defaults | species diffusivities |
 
@@ -238,7 +238,6 @@ and share the same `local`/`m3` launcher toggle (`CALIB_LAUNCHER`, `CALIB_NP`,
 
 | Script | Purpose |
 |---|---|
-| `calibrate_bayesian.py` | Bayesian optimization (kf/kd/kORR sweep) using Gaussian-process surrogate modelling |
 | `sensitivity_morris.py` | Global sensitivity screening using the Morris Elementary Effects method |
 
 These tools interface directly with Dissolve™ and support automated evaluation of
@@ -250,18 +249,13 @@ orders of magnitude, so a linear-space simplex barely moves off its starting
 point in any practical number of evaluations) — see `VALIDATION.md`'s
 "Parameter Interpretation" table for the reasoning behind each parameter's
 role and why `k_d` has minimal influence in the current validation regime.
-That Nelder-Mead script isn't included in this repository; `calibrate_bayesian.py`
-below is the provided tool for recalibrating `kf`/`kd`/`kORR` against new data.
+That Nelder-Mead script isn't included in this repository; the Bayesian-optimization
+scripts in `../Scripts/BO/final_massloss_rep1/` are the provided tools for recalibrating
+k_f / k_d / k_ORR against new data.
 
-- **`calibrate_bayesian.py`** — Gaussian-process Bayesian Optimization
-  (`bayes_opt`) over the same three parameters, with early stopping, a
-  multi-fidelity coarse→fine correction factor, Random Forest parameter
-  importance, GP surrogate landscape plots, and an HTML report. Needs
-  `../Scripts/requirements.txt` installed (`bayes_opt`, `scikit-learn`,
-  `rich`, etc. — not part of this project's core dependencies).
 - **`sensitivity_morris.py`** — Morris (Elementary Effects) global
-  sensitivity screening (r = 20 trajectories, 180 runs, mass loss at 168 h) over 8 parameters (`k1`, `k2`, `k_orr`, `d_o2`,
-  `initial_o2`, `d_zn`, `d_cl`, `d_oh`) via `SALib`, ranking each by its
+  sensitivity screening (r = 20 trajectories, 180 runs, mass loss at 168 h) over 8 parameters (k_f, k_d, k_ORR, D_O2,
+  C_O2,0, D_Zn, D_Cl, D_OH; ranges in Supporting Information Table S4) via `SALib`, ranking each by its
   mean absolute effect (μ\*) on RMSE against experimental checkpoints.
   Also needs `../Scripts/requirements.txt`.
 

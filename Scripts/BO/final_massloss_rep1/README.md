@@ -8,4 +8,4 @@ Proposal and scoring scripts for the mass-loss-only calibration of `k_f`, `k_d` 
 | `propose_phase3_massloss.py` | Phase 3: local expected improvement on the mass-loss RMSE (`combined_objective_scores.csv`); run as `python propose_phase3_massloss.py <EI_seed> <LHS_seed>` |
 | `objective_v2.py` | Scores a run against the calibration target (Liu et al., 2018, DOI 10.1016/j.jmst.2018.05.005) over 24-336 h, after the coarse-to-fine mesh correction |
 
-The scripts read their inputs (`phase1_scores.csv`, `combined_objective_scores.csv`, `target_jmst2018.csv`) from the folder they are run in. The generic driver is `../calibrate_bayesian.py`, whose settings follow Table S9 of the Supporting Information.
+The scripts read their inputs (`phase1_scores.csv`, `combined_objective_scores.csv`, `target_jmst2018.csv`) from the folder they are run in.

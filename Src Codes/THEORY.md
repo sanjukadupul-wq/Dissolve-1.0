@@ -265,19 +265,19 @@ Symbols follow the paper (Eqs. 6-12); `Γ` is the moving Zn-electrolyte interfac
 (`δΓ` its surface delta function).
 
 ```text
-∂C_O2/∂t = ∇·(D_O2^eff ∇C_O2) − kORR C_O2 δΓ                       (7)
+∂C_O2/∂t = ∇·(D_O2^eff ∇C_O2) − k_ORR C_O2 δΓ                       (7)
 ∂C_Cl/∂t = ∇·(D_Cl^eff ∇C_Cl)                                       (8)
-∂C_Zn/∂t = ∇·(D_Zn^eff ∇C_Zn) + 2 kORR C_O2 δΓ − ∂F/∂t             (9)
-∂C_OH/∂t = ∇·(D_OH^eff ∇C_OH) + 4 kORR C_O2 δΓ − 2 ∂F/∂t           (10)
-∂F/∂t    = kf C_Zn (1 − F/Fmax) − kd F C_Cl²                        (11)
+∂C_Zn/∂t = ∇·(D_Zn^eff ∇C_Zn) + 2 k_ORR C_O2 δΓ − ∂F/∂t             (9)
+∂C_OH/∂t = ∇·(D_OH^eff ∇C_OH) + 4 k_ORR C_O2 δΓ − 2 ∂F/∂t           (10)
+∂F/∂t    = k_f C_Zn (1 − F/Fmax) − k_d F C_Cl²                        (11)
 D_i^eff  = D_i^0 [ (1 − F/Fmax) + (F/Fmax) ε/τ ]                    (12)
 ```
 
 Notes on the implementation (`physics/governing_equations.idp`):
 
-- `kORR` is a first-order surface rate constant (mm/h); the ORR sink, the Zn²⁺
+- `k_ORR` is a first-order surface rate constant (mm/h); the ORR sink, the Zn²⁺
   source and the OH⁻ source are all `int2d(..., levelset=phi)` interface integrals.
-- `kd` has units mm⁶ g⁻² h⁻¹, i.e. film dissolution is second order in Cl⁻ as
+- `k_d` has units mm⁶ g⁻² h⁻¹, i.e. film dissolution is second order in Cl⁻ as
   coded (the paper's Eq. 11 prints `C_Cl`; its units imply the square).
 - Concentrations and `F` are mass-based (g/mm³) in the code, and
   `Fmax = ρ_film (1 − ε)`.
@@ -451,7 +451,7 @@ Corrosion Product Generation
 Film Growth
 ```
 
-Film formation is controlled by the film-formation rate parameter `kf`. Higher
+Film formation is controlled by the film-formation rate parameter `k_f`. Higher
 formation rates lead to faster surface coverage and increased transport resistance
 around the degrading scaffold.
 
@@ -465,7 +465,7 @@ Film Destabilization
 Film Breakdown
 ```
 
-Film degradation is controlled by `kd` (mm⁶ g⁻² h⁻¹), which governs the
+Film degradation is controlled by `k_d` (mm⁶ g⁻² h⁻¹), which governs the
 chloride-mediated removal of corrosion products and the reopening of transport
 pathways to the scaffold surface.
 
@@ -591,8 +591,8 @@ restricted oxygen access.
 
 ### ORR Control Parameter
 
-The cathodic reaction rate is governed by `kORR` (mm/h), which controls the intensity of
-oxygen reduction at the scaffold surface. Increasing `kORR` generally leads to:
+The cathodic reaction rate is governed by `k_ORR` (mm/h), which controls the intensity of
+oxygen reduction at the scaffold surface. Increasing `k_ORR` generally leads to:
 
 ```text
 Faster Oxygen Consumption
@@ -720,7 +720,7 @@ Dissolve™ evaluates degradation from three rate limitations (paper Eqs. 14-17)
 
 ```text
 Zn²⁺ transport-limited (Stefan)   →  vZn
-ORR reaction-limited              →  vORR = −2 kORR C_O2|Γ / [Zn]sol
+ORR reaction-limited              →  vORR = −2 k_ORR C_O2|Γ / [Zn]sol
 O₂ transport-limited              →  vO2  = −2 D_O2^eff ∇C_O2·n / [Zn]sol
 v_n = min(vZn, vORR, vO2)   (hard minimum of the rate magnitudes)
 ```
@@ -729,7 +729,7 @@ In the code `vO2` is the slower of the reaction- and diffusion-limited O₂ term
 and `v = max(vZn, vO2)` on the (non-positive) velocities, which is the same
 hard minimum. Early on the interface is reaction-controlled; as the film
 thickens and O₂ is depleted it becomes oxygen-diffusion-controlled (Damköhler
-number `Da = kORR C_O2 / (D_O2^eff ∇C_O2·n)` crosses 1, after about 40 h for the disc).
+number `Da = k_ORR C_O2 / (D_O2^eff ∇C_O2·n)` crosses 1, after about 40 h for the disc).
 
 These contributions represent the transport and reaction limitations governing the
 degradation process.
@@ -1162,9 +1162,9 @@ experimentally observed degradation behaviour.
 ### Parameters Commonly Calibrated
 
 ```text
-kf   : Film formation rate          (35.91 h⁻¹)
-kd   : Film degradation rate        (27.17 mm⁶ g⁻² h⁻¹)
-kORR : Oxygen reduction rate        (0.51 mm h⁻¹)
+k_f   : Film formation rate          (35.91 h⁻¹)
+k_d   : Film degradation rate        (27.17 mm⁶ g⁻² h⁻¹)
+k_ORR : Oxygen reduction rate        (0.51 mm h⁻¹)
 ```
 
 These three effective kinetic parameters are the only ones calibrated in the
@@ -1208,9 +1208,9 @@ Simulation Evaluation
 Bayesian optimization improves search efficiency by focusing evaluations in
 promising regions of parameter space. Paper settings: 12-point Latin hypercube
 start, expected-improvement acquisition, 32 evaluations (optimum at iteration
-22), search ranges kf [1, 100], kd [5, 100], kORR [0.05, 5].
+22), search ranges k_f [1×10⁴, 8×10⁵] h⁻¹, k_d [2×10⁷, 4×10⁸] mm⁶ g⁻² h⁻¹, k_ORR [8, 800] mm h⁻¹.
 
-Implementation: `../Scripts/BO/calibrate_bayesian.py`
+Implementation: `../Scripts/BO/final_massloss_rep1/`
 
 **Sensitivity Analysis**
 
@@ -1225,7 +1225,7 @@ Sensitivity Ranking
 Sensitivity studies identify which parameters have the greatest influence on
 degradation predictions. Paper settings: Morris elementary effects, 8 parameters,
 r = 20 trajectories (180 runs), response = mass loss at 168 h. Ranking: dissolved
-O₂ concentration > kORR > kd > D_O2 > kf; Zn²⁺/Cl⁻/OH⁻ diffusivities negligible.
+O₂ concentration > k_ORR > k_d > D_O2 > k_f; Zn²⁺/Cl⁻/OH⁻ diffusivities negligible.
 
 Implementation: `../Scripts/GSA/sensitivity_morris.py`
 
@@ -1281,7 +1281,7 @@ The calibration framework can generate:
 ### Implementation
 
 ```text
-../Scripts/BO/calibrate_bayesian.py
+../Scripts/BO/final_massloss_rep1/
 ../Scripts/GSA/sensitivity_morris.py
 ```
 

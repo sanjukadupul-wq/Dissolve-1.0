@@ -119,9 +119,7 @@ real eps = getARGV("-film_porosity", 0.25);
 real del = getARGV("-film_constrictivity", 1.);
 
 // --- Reaction kinetics (1/hour and mm^3/(g.hour)) --------------------------
-// Renamed from k1/k2 to kf/kd (film FORMATION rate, film DEGRADATION rate)
-// to match the naming used in the paper figures. -k_f/-k_d are the current
-// flags; -k1/-k2 are no longer accepted.
+// k_f (film FORMATION rate) and k_d (film DEGRADATION rate), set with -k_f / -k_d.
 real kf = getARGV("-k_f", 125.18);
 real kd = getARGV("-k_d", 39.22);
 

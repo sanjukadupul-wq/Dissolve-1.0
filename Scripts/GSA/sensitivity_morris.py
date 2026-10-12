@@ -8,9 +8,8 @@ the Morris design in Table S5 (SALib, p = 4 levels, r = 20 trajectories, 8
 parameters -> 180 model evaluations, response = mass loss after 168 h). The
 kinetic ranges are in the units of the current solver (k_f in h^-1, k_d in
 mm^6 g^-2 h^-1, k_ORR in mm h^-1), selected with the flags in V4_FLAGS below.
-See calibrate_bayesian.py's docstring for the flag-mapping table
-(mesh/k1/k2/k_orr/final_time/time_step/redistance_time/save_each/output-file
-flags all map the same way here).
+Solver flags: -k_f, -k_d, -k_orr, -diff_o2, -diff_zn, -diff_cl, -diff_oh, -o2_initial,
+-sim_duration, -dt_hours, -redistance_interval, -save_interval, -results_file.
 
 Requirements (not part of this project's core dependencies -- install
 separately): pandas, numpy, matplotlib, seaborn (optional), SALib, rich.
@@ -75,23 +74,22 @@ CHECKPOINT_FILE = str(WORKDIR / "output_sensitivity" / "sensitivity_checkpoint.j
 
 # ---------------------------------------------------------------------------
 # Launcher: "local" (default) runs ff-mpirun directly. "m3" runs inside an
-# already-allocated SLURM job via srun+singularity -- same pattern as
-# calibrate_kinetics.py / calibrate_bayesian.py.
+# already-allocated SLURM job via srun+singularity.
 # ---------------------------------------------------------------------------
 LAUNCHER = os.environ.get("CALIB_LAUNCHER", "local")
 SIF_PATH = os.environ.get("CALIB_SIF_PATH", str(Path.home() / "software" / "freefem.sif"))
 
 
-def build_command(k1, k2, k_orr, d_o2, initial_o2, d_zn, d_cl, d_oh):
+def build_command(k_f, k_d, k_ORR, D_O2, C_O2_0, D_Zn, D_Cl, D_OH):
     """Parameter names here match the SALib problem definition below
     (kept unchanged from the original); mapped to the current solver's
     flag names on the actual CLI."""
     out_rel = os.path.relpath(DEFAULT_OUTPUT, WORKDIR)
     dissolve_args = [
         "-input_mesh", MESH_FILE,
-        "-k_f", str(k1), "-k_d", str(k2), "-k_orr", str(k_orr),
-        "-diff_o2", str(d_o2), "-o2_initial", str(initial_o2),
-        "-diff_zn", str(d_zn), "-diff_cl", str(d_cl), "-diff_oh", str(d_oh),
+        "-k_f", str(k_f), "-k_d", str(k_d), "-k_orr", str(k_ORR),
+        "-diff_o2", str(D_O2), "-o2_initial", str(C_O2_0),
+        "-diff_zn", str(D_Zn), "-diff_cl", str(D_Cl), "-diff_oh", str(D_OH),
         *V4_FLAGS,
         "-sim_duration", str(FINAL_TIME), "-dt_hours", str(TIME_STEP),
         "-redistance_interval", str(REDISTANCE_TIME), "-save_interval", "24",
@@ -125,16 +123,16 @@ if EXP_DATA.empty:
 # Diffusivities are in mm^2 h^-1 (Table S4 lists them in mm^2 s^-1: 1.39e-3 mm^2 s^-1 = 5.0 mm^2 h^-1).
 problem = {
     'num_vars': 8,
-    'names': ['k1', 'k2', 'k_orr', 'd_o2', 'initial_o2', 'd_zn', 'd_cl', 'd_oh'],
+    'names': ['k_f', 'k_d', 'k_ORR', 'D_O2', 'C_O2_0', 'D_Zn', 'D_Cl', 'D_OH'],
     'bounds': [
-        [1e4, 8e5],         # k1  (k_f, film formation)       h^-1
-        [2e7, 4e8],         # k2  (k_d, film dissolution)     mm^6 g^-2 h^-1
-        [8.0, 800.0],       # k_orr                           mm h^-1
-        [5.0, 20.0],        # d_o2   (1.39e-3 - 5.56e-3 mm^2 s^-1)
-        [1e-9, 1e-8],       # initial_o2                      g mm^-3
-        [1.5, 5.0],         # d_zn   (4.17e-4 - 1.39e-3 mm^2 s^-1)
-        [5.0, 15.0],        # d_cl   (1.39e-3 - 4.17e-3 mm^2 s^-1)
-        [15.0, 35.0]        # d_oh   (4.17e-3 - 9.72e-3 mm^2 s^-1)
+        [1e4, 8e5],         # k_f  (film formation)           h^-1
+        [2e7, 4e8],         # k_d  (film dissolution)         mm^6 g^-2 h^-1
+        [8.0, 800.0],       # k_ORR                           mm h^-1
+        [5.0, 20.0],        # D_O2   (1.39e-3 - 5.56e-3 mm^2 s^-1)
+        [1e-9, 1e-8],       # C_O2,0                         g mm^-3
+        [1.5, 5.0],         # D_Zn   (4.17e-4 - 1.39e-3 mm^2 s^-1)
+        [5.0, 15.0],        # D_Cl   (1.39e-3 - 4.17e-3 mm^2 s^-1)
+        [15.0, 35.0]        # D_OH   (4.17e-3 - 9.72e-3 mm^2 s^-1)
     ]
 }
 
@@ -166,24 +164,17 @@ def save_checkpoint_entry(index, params, result):
 
 # --- Simulation Runner ---
 def run_simulation(index, params):
-    k1, k2, k_orr, d_o2, initial_o2, d_zn, d_cl, d_oh = params
+    k_f, k_d, k_ORR, D_O2, C_O2_0, D_Zn, D_Cl, D_OH = params
 
-    param_text = f"""[cyan]k1[/cyan]         = {k1:.4f}
-[cyan]k2[/cyan]         = {k2:.4f}
-[cyan]k_orr[/cyan]      = {k_orr:.4f}
-[cyan]d_o2[/cyan]       = {d_o2:.4f}
-[cyan]d_zn[/cyan]       = {d_zn:.4f}
-[cyan]d_cl[/cyan]       = {d_cl:.4f}
-[cyan]d_oh[/cyan]       = {d_oh:.4f}
-[cyan]init_o2[/cyan]    = {initial_o2:.2e}"""
-    console.print(Panel(param_text, title=f"Run {index}", border_style="blue", box=box.ROUNDED))
-
-    time.sleep(2)  # brief cooldown between MPI launches
-
-    env = os.environ.copy()
-    env["OMP_NUM_THREADS"] = "1"
-
-    cmd = build_command(k1, k2, k_orr, d_o2, initial_o2, d_zn, d_cl, d_oh)
+    param_text = f"""[cyan]k_f[/cyan]       = {k_f:.4e}
+[cyan]k_d[/cyan]       = {k_d:.4e}
+[cyan]k_ORR[/cyan]     = {k_ORR:.4f}
+[cyan]D_O2[/cyan]      = {D_O2:.4f}
+[cyan]D_Zn[/cyan]      = {D_Zn:.4f}
+[cyan]D_Cl[/cyan]      = {D_Cl:.4f}
+[cyan]D_OH[/cyan]      = {D_OH:.4f}
+[cyan]C_O2,0[/cyan]    = {C_O2_0:.2e}"""
+    cmd = build_command(k_f, k_d, k_ORR, D_O2, C_O2_0, D_Zn, D_Cl, D_OH)
     rmse = 1e9
 
     # dissolve.edp prints "Time: <t>h  (...)    Step: ..." -- extract the
