@@ -56,6 +56,7 @@ srun --mpi=pmi2 singularity exec --bind /fs04 $SIF_PATH FreeFem++-mpi -nw dissol
     -diff_o2 "$D_O2" -o2_initial "$C_O2_0" -diff_zn "$D_ZN" \
     -diff_cl "$D_CL" -diff_oh "$D_OH" \
     -film_tortuosity 2.0 \
+    -conservative 2 -film_mode 1 -kf_rate_units 1 -kd_mass_units 1 \
     -enable_redistance 1 -redistance_interval 24.0 \
     -vel_extension 1 -h_interface 0.05 -search_method 1 \
     -min_disk_free_gb 20 \
