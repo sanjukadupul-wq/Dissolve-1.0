@@ -6,8 +6,8 @@ Scripts, designs and results of the mass-loss-only calibration of `k_f`, `k_d` a
 
 | Phase | Points | How the points were chosen | Files |
 |---|---|---|---|
-| 1 | 12 | Global Latin-hypercube design over `k_f` 1-100, `k_d` 1-100, `k_ORR` 0.05-5 (log scale) | `doe_design_global.csv`, `run_bo_v2_doe_global.slurm`, `phase1_scores.csv` |
-| 2 | 8 | Expected improvement on a Matern 2.5 GP fitted to log10 RMSE | `propose_phase2_v2.py`, `doe_design_phase2.csv`, `run_bo_v2_phase2.slurm`, `phase2_scores.csv` |
+| 1 | 12 | Global Latin-hypercube design over `k_f` 1-100, `k_d` 1-100, `k_ORR` 0.05-5 (log scale) | `doe_design_global.csv`, `run_bo_v2_doe_global.slurm`, `phase1_scores.csv` (input to Phase 2) |
+| 2 | 8 | Expected improvement on a Matern 2.5 GP fitted to log10 RMSE | `propose_phase2_v2.py`, `doe_design_phase2.csv`, `run_bo_v2_phase2.slurm` |
 | 3 | 8 | Local expected improvement on mass loss only; axes whose GP length scale is at its upper bound (`k_f`, `k_d`) are stratified by Latin hypercube within a factor 3 of the best point | `propose_phase3_massloss.py`, `doe_design_phase3b.csv`, `run_bo_v2_phase3b.slurm` |
 
 `objective_v2.py` scores a run against `target_jmst2018.csv` (Liu et al., 2018, DOI 10.1016/j.jmst.2018.05.005) over t = 24-336 h. The simulated mass loss is first corrected from the coarse to the fine mesh (1.355846 x - 0.001584); the corrosion rate it also reports is the cumulative-average penetration rate. The Phase 3 objective is the mass-loss RMSE only.
@@ -18,8 +18,7 @@ Scripts, designs and results of the mass-loss-only calibration of `k_f`, `k_d` a
 
 | File | Content |
 |---|---|
-| `optimization_runs_v2_massloss_rep1.csv` | All 28 evaluations: parameters, mass-loss RMSE (%), mass loss at the end of the run (%) and stage |
-| `combined_objective_scores_all28.csv` | The same 28 runs with the combined mass-loss + corrosion-rate objective J |
+| `optimization_runs_v2_massloss_rep1.csv` | All 28 evaluations: parameters, mass-loss RMSE (%), mass loss at the end of the run (%) and stage (final result) |
 | `combined_objective_scores.csv` | The 20 Phase 1 + 2 evaluations used to fit the Phase 3 GP |
 
 Lowest mass-loss RMSE: run 25, `k_f` = 2.7468, `k_d` = 5.1937, `k_ORR` = 0.1612 (RMSE 0.0173 %, mass loss 0.339 %).
