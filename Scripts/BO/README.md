@@ -1,4 +1,4 @@
-# Final mass-loss BO scripts (repeat 1)
+# Final mass-loss BO scripts
 
 Proposal and scoring scripts for the mass-loss-only calibration of `k_f`, `k_d` and `k_ORR` on the 10 x 2 mm disc (v2 solver). Only the Python scripts are distributed; the DoE designs, score tables and run outputs are not included.
 

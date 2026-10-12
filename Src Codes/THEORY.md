@@ -1210,7 +1210,7 @@ promising regions of parameter space. Paper settings: 12-point Latin hypercube
 start, expected-improvement acquisition, 32 evaluations (optimum at iteration
 22), search ranges k_f [1×10⁴, 8×10⁵] h⁻¹, k_d [2×10⁷, 4×10⁸] mm⁶ g⁻² h⁻¹, k_ORR [8, 800] mm h⁻¹.
 
-Implementation: `../Scripts/BO/final_massloss_rep1/`
+Implementation: `../Scripts/BO/`
 
 **Sensitivity Analysis**
 
@@ -1281,7 +1281,7 @@ The calibration framework can generate:
 ### Implementation
 
 ```text
-../Scripts/BO/final_massloss_rep1/
+../Scripts/BO/
 ../Scripts/GSA/sensitivity_morris.py
 ```
 

@@ -250,7 +250,7 @@ point in any practical number of evaluations) — see `VALIDATION.md`'s
 "Parameter Interpretation" table for the reasoning behind each parameter's
 role and why `k_d` has minimal influence in the current validation regime.
 That Nelder-Mead script isn't included in this repository; the Bayesian-optimization
-scripts in `../Scripts/BO/final_massloss_rep1/` are the provided tools for recalibrating
+scripts in `../Scripts/BO/` are the provided tools for recalibrating
 k_f / k_d / k_ORR against new data.
 
 - **`sensitivity_morris.py`** — Morris (Elementary Effects) global
