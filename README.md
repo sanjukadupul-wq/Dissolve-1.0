@@ -2,10 +2,6 @@
 
 > **DISSOLVE** = **D**egradation **I**n-**S**ilico **SOLVE**r
 
-Supporting code, mesh-generation scripts, calibration, and validation results for the
-paper *"Mechanistic modeling of zinc degradation in physiological environments governed
-by oxygen reduction kinetics."*
-
 Dissolve™ is a high-fidelity computational platform for predicting degradation of
 biodegradable zinc-based implants and porous scaffolds in physiological environments.
 Built on a 3D reaction-diffusion and level-set framework using FreeFEM++, MPI, and
@@ -50,9 +46,8 @@ development activities, including:
 The solver has been systematically calibrated and validated against controlled 28-day
 HBSS immersion experiments of pure Zn, with ongoing verification across multiple
 implant geometries and degradation conditions. Validation workflows include
-degradation kinetics, mass-loss evolution, corrosion morphology, and sensitivity
-analysis to ensure predictive reliability across a range of biodegradable zinc-alloy
-applications.
+degradation kinetics, mass-loss evolution, and sensitivity analysis to ensure
+predictive reliability across a range of biodegradable zinc-alloy applications.
 
 ## Software Architecture
 
