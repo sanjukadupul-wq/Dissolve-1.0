@@ -27,8 +27,8 @@
 IFMACRO(!idpGoverningEquations)
 macro idpGoverningEquations 1//
 
-macro fFormationRate 1.0*(1 - filmMode)*kf*Zn*(1.0 - F/filmCapacity) //EOM
-macro fDissolutionRate kd*F*(clMolarConv*Cl)*(clMolarConv*Cl) //EOM
+macro fFormationRate 1.0*(1 - filmMode)*kf*Zn*(1.0 - F/filmCapVol) //EOM
+macro fDissolutionRate kdVol*F*(clMolarConv*Cl)*(clMolarConv*Cl) //EOM
 
 // --- Oxygen transport + surface ORR sink ------------------------------------
 // dO2/dt + div(u O2) = div(DeO2 grad O2), with O2 consumed by the cathodic
@@ -77,10 +77,14 @@ varf zinc(Zn, wZn) =
 varf film(F, wF) =
   intN(Mesh, qfV=qfV1lump, optimize=0)(F/dt*wF)
   + intN(Mesh, qfV=qfV1lump, optimize=0)(Fold/dt*wF)
-  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*(1 - filmMode)*kf*Zn*F/filmCapacity*wF)
-  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*(1 - filmMode)*kf*Zn*wF)
-  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*fDissolutionRate*wF)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*(1 - filmMode)*(1 - volFilmUnits)*kf*Zn*F/filmCapVol*wF)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*(1 - filmMode)*kf*Zn*(1.0 - volFilmUnits*Fold/filmCapVol)*wF)
+  + intN(Mesh, qfV=qfV1lump)((phi <= 0)*(1 - volFilmUnits)*fDissolutionRate*wF)
+  - intN(Mesh, qfV=qfV1lump)((phi <= 0)*volFilmUnits*kdVol*Fold*(clMolarConv*Clold)*(clMolarConv*Clold)*wF)
 ;
+// -vol_film_units 1: the film update uses EXACTLY the same exchange terms as the Zn equation (saturation factor from Fold, dissolution from Fold and the
+// start-of-step Cl, formation from the new Zn), so Zn removed from solution = film gained and Zn released = film lost, to round-off for any k_f, k_d, dt.
+// The legacy form (volFilmUnits 0) is implicit in F here but explicit in F in the Zn equation, which leaves a closure error of about k_d*Cl^2*dt.
 
 // --- Cl- transport -------------------------------------------------------
 // Pure transport, no volumetric source/sink -- Cl- only participates in the
@@ -118,6 +122,14 @@ varf hydroxide(OH, wOH) =
   + intN(Mesh, qfV=qfV1lump)((phi <= 0)*((1 - ohFix)*2.0 + ohFix*2.0e6/znMolarMass)*fDissolutionRate*wOH)
   + int2d(Mesh, levelset=phi)(((1 - ohFix)*4.0 + ohFix*4.0e6/o2MolarMass)*kORR*sinkRatio*sinkMult*O2*wOH)
 ;
+
+
+// --- Flux-first coupling (-flux_first 1) ------------
+// Interface weights and the O2-flux moment used to build the recession velocity as a LUMPED, interface-weighted
+// projection of the flux the implicit sink removes: v_i = N_i / W_i with W_i = int_Gamma psi_i, N_i = int_Gamma (-vfac*kORR*sinkMult*O2) psi_i.
+// Because sum_i psi_i = 1, int_Gamma v = -vfac * int_Gamma kORR*sinkMult*O2 exactly (same quadrature as the sink).
+varf fluxW(u, w) = int2d(Mesh, levelset=phi)(w);
+varf fluxN(u, w) = int2d(Mesh, levelset=phi)(-2.0*o2ToMolar*znMolarMass/znDensity*kORR*sinkRatio*sinkMult*O2*w);
 
 // --- Level-set advection of the solid/medium interface ----------------------
 // dphi/dt + v|grad phi| = 0, v the (non-positive) interface recession speed

@@ -62,9 +62,10 @@ REDISTANCE_TIME = 1.0
 NUM_TRAJECTORIES = 20  # r=20 -> 20*(8+1) = 180 simulations
 NUM_LEVELS = 4         # p = 4
 
-# Solver switches for the current formulation (conservative interface coupling,
-# surface film, k_f / k_d in the units of Table S4).
-V4_FLAGS = ["-conservative", "2", "-film_mode", "1", "-kf_rate_units", "1", "-kd_mass_units", "1"]
+# Solver switches for the v1.1.0 formulation, given explicitly (not only through the code defaults):
+# flux-first interface coupling, molar-consistent OH- sources, surface film, k_f / k_d in the units of Table S4.
+V4_FLAGS = ["-flux_first", "1", "-v_picard", "0", "-conservative", "2", "-oh_fix", "1",
+            "-film_mode", "1", "-kf_rate_units", "1", "-kd_mass_units", "1"]
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 RESULTS_DIR = str(WORKDIR / "output_sensitivity" / f"sensitivity_{timestamp}")

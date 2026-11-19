@@ -15,10 +15,10 @@ else
 // --- Current scaffold volume (mass) ----------------------------------------
 real currentVolumeLoc;
 IFMACRO(intN)
-    currentVolumeLoc = intN(MeshNoOverlap)((phi > 0) * 1.0);
+    currentVolumeLoc = cutVolume(MeshNoOverlap, phi);
 ENDIFMACRO
 IFMACRO(!intN)
-    currentVolumeLoc = int3d(MeshNoOverlap)((phi > 0) * 1.0);
+    currentVolumeLoc = cutVolume(MeshNoOverlap, phi);
 ENDIFMACRO
 
 real currentVolumeGlob = 0;
@@ -105,6 +105,7 @@ if (count % saveIntervalSteps == 0)
         // same quantity measured with a continuous Heaviside, so slow
         // dissolution is visible instead of quantized onto plateaus.
         string smoothFile = resultsFolder + "/mass_loss_smooth.txt";
+        if (writeSmoothMass) {
         if (count == 0) {
             ofstream g(smoothFile);
             g << "TimeHours\tSmoothVolume\tSmoothMassLossPercent\n";
@@ -116,6 +117,21 @@ if (count % saveIntervalSteps == 0)
                              ? (smoothVolInit - smoothVolGlob) / smoothVolInit * 100.0 : 0.0;
             g << t << "\t" << smoothVolGlob << "\t" << smoothPct << endl;
         }
+        }
+
+        // paper_v3b: mass-loss budget file. Cut-cell (exact) volume loss, the Zn flux tally, their difference, the reinitialisation volume change,
+        // and the Zn released per unit oxygen consumed (1.00 = 2 Zn : 1 O2 conserved).
+        string budgetFile = resultsFolder + "/mass_loss.txt";
+        real mlFluxPct = (initialVolume > 1e-12) ? znSrcCum / (initialVolume * znDensity) * 100.0 : 0.0;
+        real zPerSupp = (o2SinkCum > 1e-30) ? znSrcCum / (2.0 * znMolarMass / o2MolarMass * o2SinkCum) : 0.0;
+        if (count == 0) {
+            ofstream h(budgetFile);
+            h << "TimeHours\tCutVolume_mm3\tMassLossCut_pct\tMassLossFlux_pct\tFluxMinusCut_pct\tReinitDVCum_mm3\tO2SinkCum_g\tZnSrcCum_g\tZnPerSupported\n";
+            h << t << "\t" << currentVolumeGlob << "\t" << massLossPct << "\t" << mlFluxPct << "\t" << (mlFluxPct - massLossPct) << "\t" << reinitDVCum << "\t" << o2SinkCum << "\t" << znSrcCum << "\t" << zPerSupp << endl;
+        } else {
+            ofstream h(budgetFile, append);
+            h << t << "\t" << currentVolumeGlob << "\t" << massLossPct << "\t" << mlFluxPct << "\t" << (mlFluxPct - massLossPct) << "\t" << reinitDVCum << "\t" << o2SinkCum << "\t" << znSrcCum << "\t" << zPerSupp << endl;
+        }
     }
 
     // --- 3. Mechanism diagnostics (concentrations, film, area, extremes) --
@@ -126,6 +142,10 @@ if (count % saveIntervalSteps == 0)
     real maxOHLoc = OH[].max; // pH = 14 + log10(OH)
     real minOHLoc = OH[].min;
     real minO2Loc = O2[].min;
+    // O2 is physically defined in electrolyte (phi <= 0); the global min also
+    // includes the diffuse-interface/metal side.
+    SpaceP1 O2LiquidMinimumField = O2 + 1.0e6*(phi > 0.0);
+    real minO2LiquidLoc = O2LiquidMinimumField[].min;
     real maxFilmLoc = F[].max;
 
     real surfaceAreaLoc = int2d(Mesh, levelset=phi)(1.0);
@@ -143,7 +163,7 @@ if (count % saveIntervalSteps == 0)
     // Film coverage: fraction of the interface AREA where the film has
     // built up past half of local capacity -- distinct from AvgFilm/MaxFilm,
     // which say nothing about how patchy vs. uniform that film is.
-    real filmCoverAreaLoc = int2d(Mesh, levelset=phi)((F/filmCapacity > 0.5));
+    real filmCoverAreaLoc = int2d(Mesh, levelset=phi)((F/filmCapVol > 0.5));
 
     // Interface-averaged mechanism velocities (mm/hour) + which branch is
     // controlling, by AREA FRACTION of the interface (a lattice's interface
@@ -177,19 +197,19 @@ if (count % saveIntervalSteps == 0)
     real o2DiffLimAreaLoc = int2d(Mesh, levelset=phi)((1.0 - (vZn >= vO2React) * (vZn >= vO2Diff)) * (vO2React < vO2Diff));
 
     IFMACRO(intN)
-        totalZnLoc = intN(MeshNoOverlap)(Zn);
-        totalClLoc = intN(MeshNoOverlap)(Cl);
-        totalOHLoc = intN(MeshNoOverlap)(OH);
-        totalO2Loc = intN(MeshNoOverlap)(O2);
-        totalFilmLoc = intN(MeshNoOverlap)(F);
+        totalZnLoc = intN(MeshNoOverlap)((phi <= 0.0)*Zn);
+        totalClLoc = intN(MeshNoOverlap)((phi <= 0.0)*Cl);
+        totalOHLoc = intN(MeshNoOverlap)((phi <= 0.0)*OH);
+        totalO2Loc = intN(MeshNoOverlap)((phi <= 0.0)*O2);
+        totalFilmLoc = (1-filmMode)*intN(MeshNoOverlap)(F) + filmMode*int2d(MeshNoOverlap, levelset=phi)(theta*filmMass);
         liquidVolLoc = intN(MeshNoOverlap)((phi <= 0) * 1.0);
     ENDIFMACRO
     IFMACRO(!intN)
-        totalZnLoc = int3d(MeshNoOverlap)(Zn);
-        totalClLoc = int3d(MeshNoOverlap)(Cl);
-        totalOHLoc = int3d(MeshNoOverlap)(OH);
-        totalO2Loc = int3d(MeshNoOverlap)(O2);
-        totalFilmLoc = int3d(MeshNoOverlap)(F);
+        totalZnLoc = int3d(MeshNoOverlap)((phi <= 0.0)*Zn);
+        totalClLoc = int3d(MeshNoOverlap)((phi <= 0.0)*Cl);
+        totalOHLoc = int3d(MeshNoOverlap)((phi <= 0.0)*OH);
+        totalO2Loc = int3d(MeshNoOverlap)((phi <= 0.0)*O2);
+        totalFilmLoc = (1-filmMode)*int3d(MeshNoOverlap)(F) + filmMode*int2d(MeshNoOverlap, levelset=phi)(theta*filmMass);
         liquidVolLoc = int3d(MeshNoOverlap)((phi <= 0) * 1.0);
     ENDIFMACRO
 
@@ -202,11 +222,16 @@ if (count % saveIntervalSteps == 0)
     mpiAllReduce(liquidVolLoc, liquidVolGlob, mpiCommWorld, mpiSUM);
     mpiAllReduce(surfaceAreaLoc, surfaceAreaGlob, mpiCommWorld, mpiSUM);
 
-    real maxZnGlob=0, maxOHGlob=0, minOHGlob=0, minO2Glob=0, maxFilmGlob=0;
+    if (count == 0) o2InventoryInitial = totalO2Glob;
+    real o2SupplyInferred = totalO2Glob - o2InventoryInitial + o2SinkCum;
+    real znBalanceResidual = totalZnGlob + totalFilmGlob + znRemovedCum - znSrcCum;
+
+    real maxZnGlob=0, maxOHGlob=0, minOHGlob=0, minO2Glob=0, minO2LiquidGlob=0, maxFilmGlob=0;
     mpiAllReduce(maxZnLoc, maxZnGlob, mpiCommWorld, mpiMAX);
     mpiAllReduce(maxOHLoc, maxOHGlob, mpiCommWorld, mpiMAX);
     mpiAllReduce(minOHLoc, minOHGlob, mpiCommWorld, mpiMIN);
     mpiAllReduce(minO2Loc, minO2Glob, mpiCommWorld, mpiMIN);
+    mpiAllReduce(minO2LiquidLoc, minO2LiquidGlob, mpiCommWorld, mpiMIN);
     mpiAllReduce(maxFilmLoc, maxFilmGlob, mpiCommWorld, mpiMAX);
 
     real ZnIfaceGlob=0, ClIfaceGlob=0, OHIfaceGlob=0, O2IfaceGlob=0, FIfaceGlob=0, filmCoverAreaGlob=0;
@@ -236,6 +261,16 @@ if (count % saveIntervalSteps == 0)
         real avgOH = totalOHGlob / vol;
         real avgO2 = totalO2Glob / vol;
         real avgFilm = totalFilmGlob / vol;
+
+        string balanceFile = resultsFolder + "/global_balance.tsv";
+        if (count == 0) {
+            ofstream b(balanceFile);
+            b << "TimeHours\tO2Inventory_g\tO2SinkCum_g\tO2NetBoundarySupplyInferred_g\tZnDissolved_g\tZnFilmRetained_g\tZnRemovedAtRenewal_g\tZnOxidizedFluxCum_g\tZnClosureResidual_g" << endl;
+            b << t << "\t" << totalO2Glob << "\t" << o2SinkCum << "\t" << o2SupplyInferred << "\t" << totalZnGlob << "\t" << totalFilmGlob << "\t" << znRemovedCum << "\t" << znSrcCum << "\t" << znBalanceResidual << endl;
+        } else {
+            ofstream b(balanceFile, append);
+            b << t << "\t" << totalO2Glob << "\t" << o2SinkCum << "\t" << o2SupplyInferred << "\t" << totalZnGlob << "\t" << totalFilmGlob << "\t" << znRemovedCum << "\t" << znSrcCum << "\t" << znBalanceResidual << endl;
+        }
 
         real hoursPerYear = 24.0 * 365.25;
         real velToCR = -hoursPerYear;   // v is negative (receding); flip sign to a positive rate
@@ -300,14 +335,14 @@ if (count % saveIntervalSteps == 0)
         // across ~30 chained operands.
         if (count == 0) {
             ofstream f(mechFile);
-            f << "TimeHours\tLiquidVol\tSurfaceArea\tAvgZn\tAvgCl\tAvgOH\tAvgO2\tTotalFilm\tMaxZn\tMaxOH\tMinO2\t"
+            f << "TimeHours\tLiquidVol\tSurfaceArea\tAvgZn\tAvgCl\tAvgOH\tAvgO2\tTotalFilm\tMaxZn\tMaxOH\tMinO2\tMinO2LiquidPhiLE0\t"
               << "SolidVolume\tCorrosionRate_Instantaneous_mm_per_year\tCorrosionRate_Average_mm_per_year\t"
               << "AvgPH\tMinPH\tMaxPH\t"
               << "Zn_Interface\tCl_Interface\tOH_Interface\tO2_Interface\tFilm_Interface\tpH_Interface\t"
               << "AvgFilm\tMaxFilm\tFilmCoveragePercent\t"
               << "vZn_Interface_mm_per_hr\tvO2React_Interface_mm_per_hr\tvO2Diff_Interface_mm_per_hr\tvFinal_Interface_mm_per_hr\t"
               << "ZnLimitedPercent\tO2ReactLimitedPercent\tO2DiffLimitedPercent\tDominantMechanism\n";
-            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << "\t"
+            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << "\t" << minO2LiquidGlob << "\t"
               << currentVolumeGlob << "\t" << instCR << "\t" << avgCR << "\t"
               << avgPH << "\t" << minPH << "\t" << maxPH << "\t"
               << ZnIface << "\t" << ClIface << "\t" << OHIface << "\t" << O2Iface << "\t" << FIface << "\t" << pHIface << "\t"
@@ -316,7 +351,7 @@ if (count % saveIntervalSteps == 0)
               << znLimPct << "\t" << o2ReactLimPct << "\t" << o2DiffLimPct << "\t" << dominantMechanism << endl;
         } else {
             ofstream f(mechFile, append);
-            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << "\t"
+            f << t << "\t" << liquidVolGlob << "\t" << surfaceAreaGlob << "\t" << avgZn << "\t" << avgCl << "\t" << avgOH << "\t" << avgO2 << "\t" << totalFilmGlob << "\t" << maxZnGlob << "\t" << maxOHGlob << "\t" << minO2Glob << "\t" << minO2LiquidGlob << "\t"
               << currentVolumeGlob << "\t" << instCR << "\t" << avgCR << "\t"
               << avgPH << "\t" << minPH << "\t" << maxPH << "\t"
               << ZnIface << "\t" << ClIface << "\t" << OHIface << "\t" << O2Iface << "\t" << FIface << "\t" << pHIface << "\t"

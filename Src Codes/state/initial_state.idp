@@ -39,13 +39,14 @@ if (!adaptMeshRuntime)
 // boundary layer. Made configurable 2026-08-14 to test that; -1 keeps the
 // mesh-derived h from above. Default preserves the old value so existing
 // runs are unchanged until this is deliberately changed.
-real hInterfaceOverride = getARGV("-h_interface", 0.002);
+// paper_v1: probe ON the interface (Eq. 14 uses the interfacial oxygen). Was 0.002/0.05 mm into the medium in the frozen v4 runs.
+real hInterfaceOverride = getARGV("-h_interface", 1.0e-6);
 if (hInterfaceOverride > 0)
   h = hInterfaceOverride;
 if (mpirank == 0)
   print("Interface probe distance h = " + h + " mm  (mesh hmin was " + hhh[].min + ")");
 
-loc = intN(MeshNoOverlap)(scaffold);
+loc = cutVolume(MeshNoOverlap, phi);
 glob = 0;
 mpiAllReduce(loc, glob, mpiCommWorld, mpiSUM);
 initialVolume = glob;

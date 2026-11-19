@@ -86,6 +86,8 @@ real h;
 real smoothVolInit = 0;
 real znRemovedCum = 0;   // g of dissolved Zn discarded by the medium renewals
 real nextResetTime = 1.0e30;
+int o2DiagStarted = 0;
+real o2TopCum = 0;   // test diagnostic: cumulative O2 inflow through the Dirichlet face (g)   // test diagnostic flag
 real o2SinkCum = 0;   // v4 diagnostic: cumulative O2 removed by the ORR sink (g), int2d(kORR*sinkRatio*O2) dt
 real znSrcCum = 0;    // v4 diagnostic: cumulative Zn injected by the interface source (g), int2d(rho_Zn*(-v)) dt (conservative mode)
 
@@ -115,3 +117,9 @@ int convectionMult = enableFlowSolve ? 1 : 0;
 int nsEnableMult = enableFullNavierStokes ? 1 : 0;
 
 ENDIFMACRO//
+
+SpaceP1 O2vel;   // oxygen used for the interface-velocity probe (start-of-step O2 on pass 0)
+
+SpaceP1 thetaVel = 0.0;   // film coverage used by sinkMult (start-of-step theta on pass 0, end-of-step theta of the previous pass afterwards)
+
+real reinitDVCum = 0;   // cumulative volume change (mm3) introduced by reinitialisation (V_after - V_before, cut-cell), summed over all calls

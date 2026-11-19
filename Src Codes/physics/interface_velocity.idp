@@ -28,16 +28,20 @@ dir2x = -(velExt*phi + 2.0*h) * xphi / normgradphi;
 dir2y = -(velExt*phi + 2.0*h) * yphi / normgradphi;
 dir2z = -(velExt*phi + 2.0*h) * zphi / normgradphi;
 
-DeZn = diffZn * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * ((1 - conservative) + conservative*(phi <= 0));
-DeCl = diffCl * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * (phi <= 0);
-DeOH = diffOH * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * (phi <= 0);
-DeO2 = diffO2 * ((1 - F/filmCapacity) + (F/filmCapacity)*del*eps/tau) * (phi <= 0);
-sinkMult = (1.0 - filmMode*theta*(1.0 - del*eps/tau));
+DeZn = diffZn * ((1 - F/filmCapVol) + (F/filmCapVol)*del*eps/tau) * ((1 - conservative) + conservative*(phi <= 0));
+DeCl = diffCl * ((1 - F/filmCapVol) + (F/filmCapVol)*del*eps/tau) * (phi <= 0);
+DeOH = diffOH * ((1 - F/filmCapVol) + (F/filmCapVol)*del*eps/tau) * (phi <= 0);
+DeO2 = diffO2 * ((1 - F/filmCapVol) + (F/filmCapVol)*del*eps/tau) * (phi <= 0);
+sinkMult = (1 - filmMode)*1.0 + filmMode*( (filmMech == 1)*exp(-filmBetaEff*thetaVel*filmThick*1.0e3) + (filmMech == 0)*( filmResMode*(1.0/(1.0 + kORR*thetaVel*filmThick/(diffO2*del*eps/tau))) + (1 - filmResMode)*(1.0 - thetaVel*(1.0 - del*eps/tau)) ) + (filmMech == 2)*(1.0/(1.0 + kORR*thetaVel*filmThick/(diffO2*del*eps/tau))) );
+// Shared P1-field ORR coupling: use O2vel and sinkMult in the same finite-element
+// basis as the implicit interface sink. This makes the FE surface integrals
+// stoichiometrically consistent; O2vel is updated from the preceding Picard pass.
 if (t == 0)
 {
   // Reaction-limited initialization: use the reaction velocity at t=0
   // instead of the (undefined) Stefan/diffusion-limited velocity.
-  vO2 = -2.0 * kORR * sinkMult * o2ToMolar * O2(x+dirx, y+diry, z+dirz) / znMolarConc;
+  vO2React = -2.0 * kORR * sinkMult * o2ToMolar * O2vel / znMolarConc;
+  vO2 = vO2React;
   v = vO2;
   znNetSource = znDensity*(-v);
   if(mpirank==0 && x==0 && y==0) { cout << "DEBUG: reaction-limited init at t=0" << endl; }
@@ -70,7 +74,47 @@ else
   // O2: reaction-limited (kinetics). SpaceP1 field, not `real` -- must be
   // assigned via the same per-node Vh mechanism as vZn above, or this
   // silently becomes one arbitrary broadcast scalar (see fields.idp).
-  vO2React = -2.0 * kORR * sinkMult * o2ToMolar * O2(x+dirx, y+diry, z+dirz) / znMolarConc;
+  vO2React = -2.0 * kORR * sinkMult * o2ToMolar * O2vel / znMolarConc;
+
+  // Same-state equation residuals are computed here, before the interface is
+  // advanced. This avoids comparing a velocity from the previous step with
+  // oxygen/film values sampled on the newly moved interface in write_results.
+  real sinkLawAbsLoc = int2d(Mesh, levelset=phi)(abs(sinkMult - (
+      (1 - filmMode)*1.0 + filmMode*((filmMech == 1)*exp(-filmBetaEff*thetaVel*filmThick*1.0e3)
+      + (filmMech == 0)*(filmResMode*(1.0/(1.0 + kORR*thetaVel*filmThick/(diffO2*del*eps/tau)))
+      + (1 - filmResMode)*(1.0 - thetaVel*(1.0 - del*eps/tau)))
+      + (filmMech == 2)*(1.0/(1.0 + kORR*thetaVel*filmThick/(diffO2*del*eps/tau)))))));
+  real sinkLawNormLoc = int2d(Mesh, levelset=phi)(abs(
+      (1 - filmMode)*1.0 + filmMode*((filmMech == 1)*exp(-filmBetaEff*thetaVel*filmThick*1.0e3)
+      + (filmMech == 0)*(filmResMode*(1.0/(1.0 + kORR*thetaVel*filmThick/(diffO2*del*eps/tau)))
+      + (1 - filmResMode)*(1.0 - thetaVel*(1.0 - del*eps/tau)))
+      + (filmMech == 2)*(1.0/(1.0 + kORR*thetaVel*filmThick/(diffO2*del*eps/tau))))));
+  real vLawAbsLoc = int2d(Mesh, levelset=phi)(abs(vO2React
+      + 2.0*kORR*sinkMult*o2ToMolar*O2vel/znMolarConc));
+  real vLawNormLoc = int2d(Mesh, levelset=phi)(abs(
+      2.0*kORR*sinkMult*o2ToMolar*O2vel/znMolarConc));
+  real sinkLawAbsGlob=0, sinkLawNormGlob=0, vLawAbsGlob=0, vLawNormGlob=0;
+  mpiAllReduce(sinkLawAbsLoc, sinkLawAbsGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(sinkLawNormLoc, sinkLawNormGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(vLawAbsLoc, vLawAbsGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(vLawNormLoc, vLawNormGlob, mpiCommWorld, mpiSUM);
+  if (mpirank == 0)
+    cout << "DEBUG_EQ_CLOSURE t=" << t
+         << " sinkRelL1=" << sinkLawAbsGlob/max(sinkLawNormGlob,1e-30)
+         << " vORRRelL1=" << vLawAbsGlob/max(vLawNormGlob,1e-30) << endl;
+
+  real auditO2VelLoc = int2d(Mesh, levelset=phi)(kORR*sinkRatio*sinkMult*O2vel);
+  real auditO2FieldLoc = int2d(Mesh, levelset=phi)(kORR*sinkRatio*sinkMult*O2);
+  real auditZnLoc = int2d(Mesh, levelset=phi)(znDensity*(-v));
+  real auditO2VelGlob=0, auditO2FieldGlob=0, auditZnGlob=0;
+  mpiAllReduce(auditO2VelLoc, auditO2VelGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(auditO2FieldLoc, auditO2FieldGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(auditZnLoc, auditZnGlob, mpiCommWorld, mpiSUM);
+  if (mpirank == 0)
+    cout << "DEBUG_FLUX_PRESOLVE t=" << t
+         << " ZnPerO2Vel=" << auditZnGlob/max((2.0*znMolarMass/o2MolarMass)*auditO2VelGlob,1e-30)
+         << " ZnPerO2Field=" << auditZnGlob/max((2.0*znMolarMass/o2MolarMass)*auditO2FieldGlob,1e-30)
+         << " O2FieldOverVel=" << auditO2FieldGlob/max(auditO2VelGlob,1e-30) << endl;
 
   // O2: diffusion-limited (Stefan approximation for O2 transport).
   //
@@ -118,12 +162,13 @@ else
     thetaOld = theta;
     SpaceP1 aRate = kfShare * znDensity * (-v) / filmMass;                          // growth rate if all released Zn precipitated (1/h)
     SpaceP1 bRate = kdUse * (clMolarConv*Cl) * (clMolarConv*Cl);                  // dissolution (1/h)
-    theta = (thetaOld + dt*aRate) / (1.0 + dt*(aRate + bRate));
+    theta = (thetaOld + dt*aRate) / (1.0 + dt*(aRate*(filmMech == 0) + bRate));   // paper_v3c: film_mech 1 drops the (1 - theta) saturation of the formation term
     znNetSource = znDensity*(-v) - filmMass*(theta - thetaOld)/dt;
     // the film is carried with the receding interface (semi-Lagrangian shift along the normal by the distance moved this step)
     searchMethod = probeSearchMethod;
     thetaOld = theta;
     theta = thetaOld(x + v*dt*xphi/normgradphi, y + v*dt*yphi/normgradphi, z + v*dt*zphi/normgradphi);
+    theta = max(0.0, min(thetaMax, theta));   // paper_v3b: the interpolation in the shift can overshoot; coverage is physically within [0, 1]
     searchMethod = 1;
   }
 

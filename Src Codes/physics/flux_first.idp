@@ -1,0 +1,176 @@
+// physics/flux_first.idp   (enabled with -flux_first 1)
+//
+// Flux-first coupling of oxygen, film and interface motion.
+//   1. Solve O2 on the CURRENT interface Gamma_n with the implicit Robin sink and the lagged film coverage theta_n
+//      (unchanged operator; the sink stays implicit, so there is no stability restriction from the coupling).
+//   2. Take the flux that sink actually removed, J = kORR*sinkRatio*sinkMult*O2, and project it to a P1 field with a LUMPED,
+//      interface-weighted projection:  v_i = N_i / W_i,  W_i = int_Gamma psi_i,  N_i = int_Gamma (-2*o2ToMolar/znMolarConc*J) psi_i.
+//      Because sum_i psi_i = 1 this gives int_Gamma v = -2*o2ToMolar/znMolarConc * int_Gamma J exactly, using the same quadrature as the sink.
+//   3. Nodes that carry no interface weight receive v from the foot point on the interface (phi is a signed distance).
+//   4. theta is updated from this v; the tallies are accumulated on Gamma_n BEFORE the interface moves.
+// No displaced probe and no Picard pass are used (run with -v_picard 0).
+
+if (mpirank==0) { print("Flux-first: O2 solve on the current interface, then conservative velocity projection...") }
+
+normgradphi = sqrt(grad(phi)'*grad(phi) + 1e-6);
+xphi = dx(phi);
+yphi = dy(phi);
+zphi = dz(phi);
+
+SpaceP1 fsatV = min(max(F/filmCapVol, 0.0), 1.0);   // saturation clipped to [0,1] so the effective diffusivity cannot leave [D*del*eps/tau, D]
+DeZn = diffZn * ((1 - fsatV) + fsatV*del*eps/tau) * ((1 - conservative) + conservative*(phi <= 0));
+DeCl = diffCl * ((1 - fsatV) + fsatV*del*eps/tau) * (phi <= 0);
+DeOH = diffOH * ((1 - fsatV) + fsatV*del*eps/tau) * (phi <= 0);
+DeO2 = diffO2 * ((1 - fsatV) + fsatV*del*eps/tau) * (phi <= 0);
+
+thetaVel = theta;
+sinkMult = (1 - filmMode)*1.0 + filmMode*( (filmMech == 1)*exp(-filmBetaEff*thetaVel*filmThick*1.0e3) + (filmMech == 0)*( filmResMode*(1.0/(1.0 + kORR*thetaVel*filmThick/(diffO2*del*eps/tau))) + (1 - filmResMode)*(1.0 - thetaVel*(1.0 - del*eps/tau)) ) + (filmMech == 2)*(1.0/(1.0 + kORR*thetaVel*filmThick/(diffO2*del*eps/tau))) );
+sinkRatio = 1.0;
+
+// ---- 1. oxygen solve on Gamma_n (identical to the block in numerics/timestep_solver.idp) ----
+if (enableO2Equation)
+{
+  if (mpirank==0) { print("Solving O2 concentration equation (ORR) on the current interface..."); setCPUTime }
+
+  O2old = O2;
+
+  Loc = oxygen(SpaceP1, SpaceP1);
+  B = oxygen(0, SpaceP1);
+  A = Loc;
+  O2[] = A^-1 * B;
+
+  real omega = o2RelaxOmega;
+  if (o2RelaxScaleWithDt && o2RelaxRefDt > 0)
+    omega = 1.0 - pow(1.0 - o2RelaxOmega, dt / o2RelaxRefDt);
+  omega = max(0.0, min(1.0, omega));
+  O2[] = omega * O2[] + (1.0 - omega) * O2old[];
+
+  if (mpirank==0) { printElapsedTime }
+}
+
+// ---- 2. conservative projection of the removed flux to the recession velocity ----
+{
+  real[int] Wd = fluxW(0, SpaceP1);
+  real[int] Nn = fluxN(0, SpaceP1);
+  SpaceP1 Wfld;
+  Wfld[] = Wd;
+  real Wthr = 1.0e-12;                       // mm^2: nodes below this carry no interface weight
+  int nloc = Wd.n;
+  int[int] Iv(nloc), Jv(nloc);
+  for (int ii = 0; ii < nloc; ii++)
+  {
+    Iv[ii] = ii; Jv[ii] = ii;
+    if (Wd[ii] < Wthr) Wd[ii] = 1.0;         // regularise; the right-hand side is ~0 there, so v = ~0 and the extension below replaces it
+  }
+  matrix Mv = [Iv, Jv, Wd];
+  Loc = Mv;
+  A = Loc;
+  SpaceP1 vG;
+  vG[] = A^-1 * Nn;
+
+  searchMethod = probeSearchMethod;
+  v = (Wfld > Wthr)*vG + (Wfld <= Wthr)*vG(x - phi*xphi/normgradphi, y - phi*yphi/normgradphi, z - phi*zphi/normgradphi);
+  searchMethod = 1;
+}
+// Verify and close the integrated flux after projecting onto P1. Spatially varying
+// film resistance can leave a tiny partition/quadrature residual between the
+// assembled projection (Mesh) and production surface integral (MeshNoOverlap).
+// Permit only a bounded correction (<1e-4); larger mismatches fail closed.
+{
+  real sinkLoc = int2d(MeshNoOverlap, levelset=phi)(kORR*sinkRatio*sinkMult*O2);
+  real znProjLoc = int2d(MeshNoOverlap, levelset=phi)(znDensity*(-v));
+  real sinkGlob = 0.0, znProjGlob = 0.0;
+  mpiAllReduce(sinkLoc, sinkGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(znProjLoc, znProjGlob, mpiCommWorld, mpiSUM);
+  real znTargetGlob = (2.0*znMolarMass/o2MolarMass)*sinkGlob;
+  real preResidual = abs(znProjGlob-znTargetGlob)/max(znTargetGlob,1e-30);
+  if (sinkGlob <= 0.0 || znProjGlob <= 0.0 || preResidual > fluxProjTol)
+  {
+    if (mpirank == 0) cout << "ERROR_FLUXFIRST_PROJECTION_BALANCE preResidual=" << preResidual << endl;
+    exit(3);
+  }
+  real fluxScale = znTargetGlob / znProjGlob;
+  v = fluxScale*v;
+  real znPostLoc = int2d(MeshNoOverlap, levelset=phi)(znDensity*(-v));
+  real znPostGlob = 0.0;
+  mpiAllReduce(znPostLoc, znPostGlob, mpiCommWorld, mpiSUM);
+  real postResidual = abs(znPostGlob-znTargetGlob)/max(znTargetGlob,1e-30);
+  if (postResidual > 1.0e-8)
+  {
+    if (mpirank == 0) cout << "ERROR_FLUXFIRST_POSTPROJECTION_BALANCE residual=" << postResidual << endl;
+    exit(3);
+  }
+  if (mpirank == 0) cout << "DEBUG_PROJ t=" << t << " preResidual=" << preResidual
+       << " fluxScale=" << fluxScale << " postResidual=" << postResidual << endl;
+}
+
+vO2React = v;  vO2 = v;  vO2Diff = 0.0;  vZn = 0.0;   // diagnostic columns only
+
+// ---- tallies on Gamma_n (before the interface moves) ----
+{
+  real o2SinkLoc = int2d(MeshNoOverlap, levelset=phi)(kORR*sinkRatio*sinkMult*O2);
+  real znSrcLoc  = int2d(MeshNoOverlap, levelset=phi)(znDensity*(-v));
+  real aLoc      = int2d(MeshNoOverlap, levelset=phi)(1.0);
+  real o2SinkGlob = 0, znSrcGlob = 0, aGlob = 0;
+  mpiAllReduce(o2SinkLoc, o2SinkGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(znSrcLoc, znSrcGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(aLoc, aGlob, mpiCommWorld, mpiSUM);
+  o2SinkCum += o2SinkGlob*dt; znSrcCum += znSrcGlob*dt;
+  if (mpirank == 0)
+    cout << "DEBUG_FLUXFIRST t=" << t
+         << " ZnPerO2=" << znSrcGlob/max((2.0*znMolarMass/o2MolarMass)*o2SinkGlob, 1e-30)
+         << " o2Sink=" << o2SinkGlob << " znSrc=" << znSrcGlob << " area=" << aGlob << endl;
+
+  // ---- Diagnostic: interface-to-bulk oxygen, every step (o2_interface_diag.tsv) ----
+  real o2IfLoc  = int2d(MeshNoOverlap, levelset=phi)(O2);
+  real thIfLoc  = int2d(MeshNoOverlap, levelset=phi)(theta);
+  real kapIfLoc = int2d(MeshNoOverlap, levelset=phi)(sinkMult);
+  real o2BkLoc  = int3d(MeshNoOverlap)(O2 * (phi <= 0));
+  real vlLoc    = int3d(MeshNoOverlap)(1.0 * (phi <= 0));
+  real topFluxLoc = int2d(MeshNoOverlap, InletTag)(DeO2 * (dx(O2)*N.x + dy(O2)*N.y + dz(O2)*N.z));   // inflow through the O2 Dirichlet face [g/h]
+  real topFluxGlob = 0;
+  mpiAllReduce(topFluxLoc, topFluxGlob, mpiCommWorld, mpiSUM);
+  o2TopCum += topFluxGlob*dt;
+  real o2IfGlob = 0, thIfGlob = 0, kapIfGlob = 0, o2BkGlob = 0, vlGlob = 0;
+  mpiAllReduce(o2IfLoc, o2IfGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(thIfLoc, thIfGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(kapIfLoc, kapIfGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(o2BkLoc, o2BkGlob, mpiCommWorld, mpiSUM);
+  mpiAllReduce(vlLoc, vlGlob, mpiCommWorld, mpiSUM);
+  if (mpirank == 0)
+  {
+    string diagFolder = "output";
+    if (resultsFilename.rfind("/") >= 0) diagFolder = resultsFilename(0:resultsFilename.rfind("/"));
+    string diagFile = diagFolder + "/o2_interface_diag.tsv";
+    real aSafe = max(aGlob, 1e-12);
+    real o2If = o2IfGlob / aSafe;
+    real o2Bk = o2BkGlob / max(vlGlob, 1e-12);
+    if (o2DiagStarted == 0)
+    {
+      ofstream dh(diagFile);
+      dh << "TimeHours	InterfaceArea_mm2	O2Interface_mgL	O2LiquidMean_mgL	O2Initial_mgL	Ratio_Iface_over_Initial	Ratio_Iface_over_LiquidMean	ThetaMeanIface	SinkMultMeanIface	O2FluxDensity_g_mm2_h	O2InventoryLiquid_g	O2TopInflowRate_g_h	O2TopInflowCum_g	O2SinkCum_g" << endl;
+      o2DiagStarted = 1;
+    }
+    ofstream dd(diagFile, append);
+    dd << t << "	" << aGlob << "	" << o2If*1.0e9 << "	" << o2Bk*1.0e9 << "	" << o2Initial*1.0e9 << "	" << o2If/o2Initial << "	" << o2If/max(o2Bk,1e-30)
+       << "	" << thIfGlob/aSafe << "	" << kapIfGlob/aSafe << "	" << o2SinkGlob/aSafe << "	" << o2BkGlob << "	" << topFluxGlob << "	" << o2TopCum << "	" << o2SinkCum << endl;
+  }
+}
+
+// ---- 3. film coverage from this velocity; semi-Lagrangian carry with the receding interface ----
+znNetSource = znDensity*(-v);
+if (filmMode)
+{
+  thetaOld = theta;
+  SpaceP1 aRate = kfShare * znDensity * (-v) / filmMass;
+  SpaceP1 bRate = kdUse * (clMolarConv*Cl) * (clMolarConv*Cl);
+  theta = (thetaOld + dt*aRate) / (1.0 + dt*(aRate*(filmMech == 0) + bRate));
+  znNetSource = znDensity*(-v) - filmMass*(theta - thetaOld)/dt;
+  searchMethod = probeSearchMethod;
+  thetaOld = theta;
+  theta = thetaOld(x + v*dt*xphi/normgradphi, y + v*dt*yphi/normgradphi, z + v*dt*zphi/normgradphi);
+  theta = max(0.0, min(thetaMax, theta));
+  searchMethod = 1;
+}
+
+mpiBarrier(mpiCommWorld);
