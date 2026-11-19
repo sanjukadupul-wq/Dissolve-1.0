@@ -13,8 +13,9 @@ The mathematical and numerical framework is implemented primarily in:
 
 ```text
 physics/governing_equations.idp
-physics/interface_velocity.idp
+physics/flux_first.idp
 physics/interface_kinetics.idp
+physics/interface_velocity.idp   (legacy probe-based formulation)
 ```
 
 with supporting numerical infrastructure contained in:
@@ -62,15 +63,17 @@ The Dissolve™ framework can be viewed as five coupled physical subsystems:
  Corrosion Product Film
 ```
 
-At each timestep the solver:
+At each timestep the solver (v1.1.0 flux-first mode, Section 6):
 
-1. Solves species transport equations.
-2. Updates corrosion-product film evolution.
-3. Computes interfacial reaction rates.
-4. Calculates degradation velocity.
-5. Advances the moving interface.
-6. Updates the computational mesh.
-7. Exports simulation results.
+1. Solves oxygen transport on the current interface with the implicit ORR sink.
+2. Projects the oxygen flux removed by the sink to the interface recession velocity and
+   verifies the flux balance.
+3. Updates the corrosion-product film state and accumulates the oxygen and zinc tallies
+   on the current interface.
+4. Advances the level-set interface (reinitialising at the set interval) and solves the
+   Zn²⁺, Cl⁻ and OH⁻ equations.
+5. Optionally solves the flow field and adapts the mesh.
+6. Exports simulation results.
 
 ## 1. Moving-Boundary Degradation Problem
 
@@ -202,12 +205,22 @@ reconstruction of a moving surface mesh.
 
 Accurate interface tracking requires the level-set field to remain close to a
 signed-distance function. Dissolve™ periodically performs level-set reinitialization
-to:
+(`-enable_redistance 1`, default; interval `-redistance_interval`, **default 24 h**) to:
 
 - Maintain stable interface normals
 - Improve curvature estimation
 - Preserve numerical accuracy near the boundary
 - Support robust interface-velocity calculations
+
+In v1.1.0 the reinitialization is volume-preserving: after the signed-distance
+recomputation the zero level set is shifted until the cut-cell solid volume matches its value
+before reinitialization (relative tolerance `-redist_tol`, default 1×10⁻⁹, at most
+`-redist_max_corr` iterations; the correction length scale is `-h_redist`). The cumulative
+reinitialization volume change is tallied in `mass_loss.txt` (`ReinitDVCum_mm3`), a
+non-convergent correction prints `WARNING_REDIST_CORRECTION_NOT_CONVERGED`, and the film
+inventory carried by the interface is remapped consistently with the interface
+(film mode 1). The v1.0.x releases reinitialized every 1 h without volume preservation; the
+v1.1.0 default interval is 24 h, which is the value used for the revised study.
 
 ### Model Outputs
 
@@ -261,30 +274,53 @@ overall degradation behaviour.
 
 Transport is a reaction-diffusion system (Nernst-Planck without electromigration
 or convection under static immersion), with film-modified effective diffusivity.
-Symbols follow the paper (Eqs. 6-12); `Γ` is the moving Zn-electrolyte interface
-(`δΓ` its surface delta function).
+`Γ` is the moving Zn-electrolyte interface (`δΓ` its surface delta function). In molar
+form (concentrations `C_i` in mol L⁻¹):
 
 ```text
-∂C_O2/∂t = ∇·(D_O2^eff ∇C_O2) − k_ORR C_O2 δΓ                       (7)
-∂C_Cl/∂t = ∇·(D_Cl^eff ∇C_Cl)                                       (8)
-∂C_Zn/∂t = ∇·(D_Zn^eff ∇C_Zn) + 2 k_ORR C_O2 δΓ − ∂F/∂t             (9)
-∂C_OH/∂t = ∇·(D_OH^eff ∇C_OH) + 4 k_ORR C_O2 δΓ − 2 ∂F/∂t           (10)
-∂F/∂t    = k_f C_Zn (1 − F/Fmax) − k_d F C_Cl²                        (11)
-D_i^eff  = D_i^0 [ (1 − F/Fmax) + (F/Fmax) ε/τ ]                    (12)
+∂C_O2/∂t = ∇·(D_O2^eff ∇C_O2) − k_ORR κ(θ) C_O2 δΓ                    (7)
+∂C_Cl/∂t = ∇·(D_Cl^eff ∇C_Cl)                                          (8)
+∂C_Zn/∂t = ∇·(D_Zn^eff ∇C_Zn) + 2 k_ORR κ(θ) C_O2 δΓ − (film exchange)  (9)
+∂C_OH/∂t = ∇·(D_OH^eff ∇C_OH) + 4 k_ORR κ(θ) C_O2 δΓ − 2 (film exchange) (10)
+D_i^eff  = D_i^0 [ (1 − F/Fmax) + (F/Fmax) δ ε/τ ]                      (12)
 ```
 
-Notes on the implementation (`physics/governing_equations.idp`):
+The film exchange is the Zn²⁺ removed by precipitation minus the film dissolved
+(Section 4). The stoichiometric factors 2 and 4 are **molar**: each mole of O₂ consumed
+(O₂ + 2H₂O + 4e⁻ → 4OH⁻, paired with 2Zn → 2Zn²⁺ + 4e⁻) releases 2 mol of Zn²⁺ and
+4 mol of OH⁻.
 
-- `k_ORR` is a first-order surface rate constant (mm/h); the ORR sink, the Zn²⁺
-  source and the OH⁻ source are all `int2d(..., levelset=phi)` interface integrals.
-- `k_d` has units mm⁶ g⁻² h⁻¹, i.e. film dissolution is second order in Cl⁻ as
-  coded (the paper's Eq. 11 prints `C_Cl`; its units imply the square).
-- Concentrations and `F` are mass-based (g/mm³) in the code, and
-  `Fmax = ρ_film (1 − ε)`.
-- Film formation consumes Zn²⁺ and OH⁻ (−∂F/∂t, −2∂F/∂t); chloride-driven
-  dissolution returns them. Cl⁻ is catalytic and is not consumed.
-- Inside the solid (`φ > 0`) Zn²⁺ is additionally pinned to `[Zn]_sat` by a
-  penalty term.
+**Units as implemented** (`physics/governing_equations.idp`, `config/settings.idp`):
+
+| Quantity | Unit in the code | Relation |
+|---|---|---|
+| `C_O2`, `C_Zn`, `C_Cl`, `F` | g mm⁻³ (mass-based) | molar `C = C_mass / M_i`; `M_O2` = 31.998, `M_Zn` = 65.38, `M_Cl` = 35.45 g mol⁻¹ |
+| `C_OH` | mol L⁻¹ | `pH = 14 + log10 C_OH` |
+| `k_ORR` | mm h⁻¹ | first-order surface rate constant |
+| Oxygen flux `J_O2 = k_ORR κ C_O2\|Γ` | g mm⁻² h⁻¹ | removed at the interface by the Robin sink |
+| Zn²⁺ interface source | g mm⁻² h⁻¹ | `ρ_Zn \|v\| = (2 M_Zn / M_O2) J_O2` |
+| OH⁻ interface source (`-oh_fix 1`) | mol L⁻¹ mm h⁻¹ | `(4×10⁶ / M_O2) J_O2` (`10⁶` converts mm³ to L) |
+| `k_d` | mm⁶ g⁻² h⁻¹ | with `C_Cl` in g mm⁻³; in molar form `k_d' = k_d / clMolarConv²`, `clMolarConv = 10⁶ / M_Cl ≈ 28 209` (mol L⁻¹) per (g mm⁻³) |
+
+Because the species are mass-based, the molar stoichiometric factors become mass factors
+in the Zn²⁺ equation: the mass of zinc oxidised per unit mass of oxygen consumed is
+`2 M_Zn / M_O2 ≈ 4.09`. In the v1.1.0 mode (`-conservative 2`) the Zn²⁺ source is built from
+the recession velocity, `ρ_Zn |v|`, which is tied to `J_O2` by this factor, so the units are
+consistent. The legacy `-conservative 0` Zn²⁺ source and the legacy `-oh_fix 0` OH⁻ sources
+apply the molar factors 2 and 4 directly to mass-based quantities and are **not**
+unit-consistent. The v1.1.0 default is `-oh_fix 1`, which gives the molar-consistent OH⁻ sources
+shown above. OH⁻ and pH output are not validated.
+
+Notes on the implementation:
+
+- The ORR sink, the Zn²⁺ source and the OH⁻ source are `int2d(..., levelset=phi)` interface
+  integrals.
+- `Fmax` is the film capacity `ρ_film (1 − ε)` (Section 4).
+- Film formation consumes Zn²⁺ and OH⁻; chloride-driven dissolution returns them.
+  Cl⁻ is catalytic and is not consumed.
+- With `-conservative 2` the Zn²⁺ field has no reservoir inside the solid: it is not pinned
+  inside `φ > 0` and its diffusion is masked to the electrolyte. The pinning to `[Zn]_sat`
+  by a penalty term belongs to the legacy `-conservative 0` mode.
 
 ### Field Interactions
 
@@ -409,6 +445,47 @@ than explicitly modelling individual corrosion-product phases, Dissolve™ uses 
 lumped film variable (`F`) to capture their combined influence on degradation
 behaviour and species transport.
 
+### Film variables and definitions
+
+| Symbol | Meaning | Unit | Definition / relation |
+|---|---|---|---|
+| `F` | volumetric film field (`-film_mode 0`) | g mm⁻³ | stored as Zn-equivalent mass with `-vol_film_units 1` |
+| `Fmax` | film capacity | g mm⁻³ | `ρ_film (1 − ε)`, `ρ_film` = 5.606×10⁻³ g mm⁻³, `ε` = 0.25; times `M_Zn / M_film` with `-vol_film_units 1` (`M_film` = 81.38 g mol⁻¹) |
+| `F / Fmax` | film saturation | – | enters the effective diffusivity (Eq. 12), clipped to [0, 1] |
+| `θ` | interface film state (`-film_mode 1`) | – | `θ = L / L_f`; in [0, 1] for `-film_mech 0`, uncapped for `-film_mech 1, 2` |
+| `L_f` | film thickness at `θ = 1` | mm | `-film_thickness`, default 0.001 mm |
+| `L` | film thickness | mm | `L = θ L_f` |
+| `m_f` | film inventory per unit area at `θ = 1` | g Zn mm⁻² | `ρ_film (1 − ε) L_f M_Zn / M_film`; inventory = `θ m_f` |
+| `κ(θ)` | multiplier of `k_ORR` | – | film barrier on the ORR, below |
+
+In film mode 1 the figures plot `F/Fmax` as `θ`: the output `Film_Interface` equals
+`θ Fmax`, so `Film_Interface / Fmax = θ = L / L_f`.
+
+**Film mode 1 evolution.** With the retained share `s = min(1, k_f L_f² / D_Zn)`
+(`-kf_rate_units 1`, `k_f` in h⁻¹):
+
+```text
+dθ/dt = s ρ_Zn |v| (1 − θ)^[film_mech 0] / m_f  −  k_d C_Cl² θ
+Zn²⁺ source = ρ_Zn |v| − m_f dθ/dt
+```
+
+The factor `(1 − θ)` applies to `-film_mech 0` only; `-film_mech 1, 2` use the uncapped
+formation term. Zinc is conserved: precipitated zinc leaves the Zn²⁺ source and dissolved
+film returns to it.
+
+**Barrier `κ(θ)`** (with `D_f = D_O2 δ ε / τ`):
+
+```text
+film_mech 0:  κ = 1 / (1 + k_ORR θ L_f / D_f)          (series resistance, -film_resistance 1)
+film_mech 1:  κ = exp(−β_eff θ L_f)                     (L_f in µm, β_eff in µm⁻¹)
+film_mech 2:  κ = 1 / (1 + k_ORR θ L_f / D_f)          (uncapped θ)
+```
+
+with `β_eff = β (τ/ε) / (τ_ref/ε_ref)` when `-film_beta_couple 1`, and `β_eff = β` otherwise.
+The revised study uses `-film_mech 1 -film_beta 12 -film_beta_couple 1` with `τ_ref` = 2, `ε_ref` = 0.25,
+so `β_ref` = 12 µm⁻¹ at the reference film (`ε` = 0.25, `τ` = 2) and `L_f` = 1 µm. The `τ/ε` dependence of
+the exponent is an assumed scaling, not a fitted one, and `β_ref` is fixed, not calibrated.
+
 ### Film Evolution
 
 ```text
@@ -465,7 +542,7 @@ Film Destabilization
 Film Breakdown
 ```
 
-Film degradation is controlled by `k_d` (mm⁶ g⁻² h⁻¹), which governs the
+Film degradation is controlled by `k_d` (mm⁶ g⁻² h⁻¹, with `C_Cl` in g mm⁻³), which governs the
 chloride-mediated removal of corrosion products and the reopening of transport
 pathways to the scaffold surface.
 
@@ -690,166 +767,161 @@ physics/interface_kinetics.idp
    1996.
 4. Newman, J., & Thomas-Alyea, K. E. *Electrochemical Systems.* 3rd ed., Wiley, 2004.
 
-## 6. Interface Velocity Formulation
+## 6. Interface Velocity Formulation (flux-first)
 
-The interface velocity determines how quickly the scaffold surface recedes during
-degradation and provides the link between electrochemical processes and geometry
-evolution. At every timestep, Dissolve™ calculates a local surface velocity and uses
-it to advance the level-set interface.
+The interface velocity determines how quickly the scaffold surface recedes and links
+the electrochemistry to the geometry. From v1.1.0 the velocity is derived from the
+same discrete oxygen flux that the oxygen equation removes at the interface, so that
+oxygen consumed, zinc released and metal lost are tied together by construction. This is the
+v1.1.0 default (`-flux_first 1 -v_picard 0 -conservative 2 -oh_fix 1`).
 
-### Role in the Simulation
+### Update sequence at every time step
 
 ```text
-Species Transport
-      ↓
-Surface Reactions
-      ↓
-Interface Velocity
-      ↓
-Level-Set Evolution
-      ↓
-Geometry Update
+1. Solve O₂ on the current interface Γₙ (implicit Robin sink, film coverage θₙ)
+2. Take the flux the sink removed, J = k_ORR κ(θ) C_O2|Γ
+3. Project J to the recession velocity v (conservative, interface-weighted)
+4. Update the film coverage θ from this v
+5. Accumulate the O₂ and Zn tallies on Γₙ
+6. Advance the level set with v, then solve the remaining species
 ```
 
-The interface velocity acts as the mechanism that converts local corrosion activity
-into physical material loss.
+### Velocity from the removed flux
 
-### Velocity Components
+The oxygen sink at the interface is the Robin condition
 
-Dissolve™ evaluates degradation from three rate limitations (paper Eqs. 14-17):
+```text
+−D_O2^eff ∇C_O2·n = k_ORR κ(θ) C_O2      on Γ
+```
+
+where κ(θ) is the film multiplier on the ORR (film coverage θ, Section 4). Each mole of
+O₂ consumed oxidises two moles of zinc (O₂ + 2Zn + 2H₂O → 2Zn²⁺ + 4OH⁻), so on a molar
+basis Zn:O₂ is 2:1 and, in mass, the zinc oxidised per unit oxygen consumed is
+`2 M_Zn / M_O2 ≈ 4.09`. The recession velocity is
+
+```text
+v = −2 k_ORR κ(θ) C_O2|Γ / [Zn]sol      (C_O2 in mol/mm³, [Zn]sol = ρ_Zn / M_Zn)
+ρ_Zn |v| = (2 M_Zn / M_O2) J_O2        (mass ratio 2 M_Zn / M_O2 ≈ 4.09; molar Zn:O₂ = 2:1)
+```
+
+In the solver, J is projected onto a P1 field with a lumped, interface-weighted
+projection, `v_i = N_i / W_i`, where `W_i = ∫_Γ ψ_i` and `N_i` is the integral of the
+removed flux against `ψ_i`. Because `Σ ψ_i = 1`, the integral of `v` over Γ equals the
+integral of the removed flux exactly, using the same quadrature as the sink. Nodes that
+carry no interface weight take `v` from their foot point on the interface (φ is a signed
+distance). No displaced probe and no Picard iteration are used, so there is neither a
+spatial nor a temporal lag between the oxygen sink and the velocity.
+
+### Conservation checks
+
+Before the interface moves the solver verifies that the projected zinc flux equals the
+target `(2 M_Zn/M_O2) ∫_Γ J` (relative mismatch below `-flux_proj_tol`, default 1e-4,
+followed by an exact rescaling and a post-projection residual check below 1e-8). A larger
+mismatch stops the run with `ERROR_FLUXFIRST_PROJECTION_BALANCE`. Inconsistent flags
+(`-flux_first 1` with `-v_picard` ≠ 0, with `-conservative` ≠ 2, or without the oxygen
+equation) also stop the run. Oxygen and zinc tallies are accumulated on Γₙ before the
+interface advances and are written to `mass_loss.txt`, `global_balance.tsv` and
+`o2_interface_diag.tsv`.
+
+### Reaction and diffusion control
+
+Early on the interface is reaction-controlled. As the product film forms and oxygen near the
+surface is depleted, the interface becomes diffusion-controlled. The transition is quantified by
+the interface Damköhler number used for the manuscript's reaction/diffusion boundary:
+
+```text
+Da = C_b / ⟨C_O2|Γ⟩ − 1
+```
+
+`C_b` is the Dirichlet oxygen concentration (`-o2_initial`) and `⟨C_O2|Γ⟩` the area-mean oxygen
+concentration over the interface. The solver diagnostic is `o2_interface_diag.tsv`:
+`Da = 1 / Ratio_Iface_over_Initial − 1`. `Da < 1` is reaction-controlled, `Da > 1`
+diffusion-controlled, and `Da = 1` is where the interface oxygen has fallen to half the bulk value.
+
+**Derivation.** With the Robin sink `J = k_ORR κ(θ) C_Γ` and a quasi-steady supply through a
+transport layer, `J = h_m (C_b − C_Γ)` with `h_m = D_O2^eff / δ`, so `C_b / C_Γ − 1 = k_ORR κ / h_m`:
+the ratio of the film-modified reaction rate constant to the mass-transfer coefficient. This holds
+for a spatially uniform film state; it is not an identity on a non-uniform interface.
+
+**Related quantities are different proxies, not equivalents.**
+
+| Quantity | Definition | Relation to `Da` |
+|---|---|---|
+| `Da` (above) | `C_b / ⟨C_Γ⟩ − 1` | the quantity used for the manuscript transition |
+| `Da_J` | `k_ORR ⟨κ⟩ C_b / ⟨J⟩ − 1`, `⟨J⟩` = `O2FluxDensity_g_mm2_h` | equals `Da` only if `κ` is uniform on `Γ` |
+| `Da_v` | `v_max / \|v_n\| − 1` with `v_max = 2 k_ORR C_b / [Zn]sol` (no film factor) | `(1/κ − 1) + k_ORR / h_m`: includes the film resistance; equals `Da` only for `κ = 1` |
+| `Da_v(θ)` | the same with `v_max(θ) = 2 k_ORR κ(θ) C_b / [Zn]sol` | `C_b / C_Γ − 1` pointwise, since `\|v_n\| = 2 k_ORR κ C_Γ / [Zn]sol` |
+
+Numerical comparison for the 3-D validation run (`k_ORR` = 200, `k_f` = 4×10⁵, `k_d` = 3×10⁶,
+`C_b` = 6.2 mg/L, 0–672 h, from `o2_interface_diag.tsv`):
+
+| Quantity | Crosses 1 at | Value at 24 / 168 / 336 / 672 h |
+|---|---|---|
+| `Da`, `C_b` = `-o2_initial` | 158.5 h | 17.8 / 0.875 / 0.204 / 0.074 |
+| `Da`, `C_b` = liquid-mean oxygen | 120.1 h | 10.3 / 0.463 / 0.111 / 0.041 |
+| `Da_J` | 165.9 h | 22.6 / 0.968 / 0.208 / 0.075 |
+| `Da_v`, `κ = 1` in `v_max` | never | 49 / 141 / 389 / 933 |
+
+The mean film factor `⟨κ⟩` falls to 0.37, 0.013, 0.003 and 0.001 at those times, which is why
+`Da_v` with a film-free `v_max` never reaches 1: it measures the film and the transport together.
+The transition of the manuscript (158.5 h) is the `Da` row. The Supporting Information must use
+this definition, or state `Da_v(θ)`, and must name `C_b`.
+
+In the flux-first formulation the transition emerges from the oxygen solve itself, because the
+Robin sink already includes the diffusion limit; no minimum over rate limitations is taken.
+
+### Film effects
+
+```text
+Film Growth → Reduced ORR (κ(θ) decreases) → Smaller removed flux → Lower interface velocity
+```
+
+The film coverage is updated from the same velocity that moves the interface, and the
+zinc source is the oxidised zinc minus the zinc retained in the film (and plus the film
+dissolved), so zinc is conserved at every node.
+
+### Legacy probe-based formulation (superseded)
+
+This subsection describes the formulation of v1.0.x, retained only for controlled
+reproduction of earlier results. It is **not** the v1.1.0 formulation and is not used for the
+revised study. It is selected with `-flux_first 0` (not the default); `-conservative 0|1` select
+the older minimum-of-rates rules.
 
 ```text
 Zn²⁺ transport-limited (Stefan)   →  vZn
-ORR reaction-limited              →  vORR = −2 k_ORR C_O2|Γ / [Zn]sol
+ORR reaction-limited              →  vORR = −2 k_ORR C_O2 / [Zn]sol        (probe concentration)
 O₂ transport-limited              →  vO2  = −2 D_O2^eff ∇C_O2·n / [Zn]sol
-v_n = min(vZn, vORR, vO2)   (hard minimum of the rate magnitudes)
+v = max(vZn, vO2)  on the non-positive velocities (the hard minimum of the rate magnitudes)
 ```
 
-In the code `vO2` is the slower of the reaction- and diffusion-limited O₂ terms
-and `v = max(vZn, vO2)` on the (non-positive) velocities, which is the same
-hard minimum. Early on the interface is reaction-controlled; as the film
-thickens and O₂ is depleted it becomes oxygen-diffusion-controlled (Damköhler
-number `Da = k_ORR C_O2 / (D_O2^eff ∇C_O2·n)` crosses 1, after about 40 h for the disc).
-
-These contributions represent the transport and reaction limitations governing the
-degradation process.
-
-### Zinc-Controlled Velocity
-
-```text
-Zn Dissolution
-      ↓
-Zn²⁺ Flux
-      ↓
-Interface Recession
-```
-
-The zinc component is derived from the flux of dissolved zinc species leaving the
-scaffold surface. This mechanism captures:
-
-- Anodic dissolution
-- Species transport limitations
-- Material removal from the scaffold
-
-Regions with larger zinc fluxes experience higher local recession rates.
-
-### Oxygen-Controlled Velocity
-
-```text
-O₂ Availability
-      ↓
-ORR Activity
-      ↓
-Corrosion Rate
-      ↓
-Interface Recession
-```
-
-The oxygen component reflects the influence of the oxygen reduction reaction on
-degradation. The formulation considers:
-
-- Oxygen concentration
-- ORR kinetics
-- Film transport resistance
-- Local transport limitations
-
-This allows oxygen accessibility to directly influence scaffold degradation.
-
-### Velocity Selection
-
-The overall interface velocity is determined from the coupled electrochemical and
-transport behaviour:
-
-```text
-Zn Transport + O₂ Transport + ORR Kinetics + Film Effects
-                       ↓
-               Interface Velocity
-```
-
-This approach ensures degradation remains physically consistent under both
-reaction-controlled and transport-controlled conditions.
-
-### Interface Probing
-
-Accurate velocity calculation requires evaluating species concentrations close to the
-scaffold surface:
-
-```text
-Interface
-    ↓
-Concentration Probe
-    ↓
-Local Fluxes
-    ↓
-Velocity Calculation
-```
-
-Dissolve™ supports multiple probing strategies to improve robustness on complex
-meshes and degrading geometries.
-
-### Film Effects
-
-The corrosion-product film directly influences interface motion:
-
-```text
-Film Growth
-      ↓
-Reduced O₂ Transport
-      ↓
-Reduced ORR Activity
-      ↓
-Lower Interface Velocity
-```
-
-As film accumulation increases, transport resistance grows and degradation rates can
-decrease.
+The oxygen concentration is sampled at a probe point beyond the interface
+(`-h_interface`, `-vel_extension`, `-search_method`) from the start-of-step field, optionally
+refined by `-v_picard N` semi-implicit passes (`-v_picard_w`). Diagnostic switches are
+`-use_vzn`, `-force_v`, `-delta_eps`, `-legacy_vo2diff_sign` and `-debug_probe`. Because the
+probe concentration and the oxygen sink are not the same discrete quantity, zinc removal could
+be inconsistent with the oxygen consumed (Section 6, Errors corrected in `VALIDATION.md`).
 
 ### Key Characteristics
 
-- Converts reaction and transport behaviour into geometry evolution.
-- Directly coupled to Zn²⁺ and O₂ transport.
-- Accounts for corrosion-product film effects.
-- Supports reaction-limited and transport-limited degradation.
-- Produces spatially varying surface recession rates.
-- Drives level-set interface evolution.
+- Velocity, oxygen consumption and zinc release derive from one flux; the molar Zn:O₂ ratio (2:1) is enforced by construction.
+- No probe point and no Picard iteration in the flux-first path.
+- Reaction- and diffusion-controlled regimes follow from the Robin sink.
+- Spatially varying recession rates drive the level-set evolution.
+- Conservation is checked every step and fails closed.
 
 ### Model Outputs
 
-The interface velocity formulation provides:
-
-- Local degradation velocities.
-- Surface recession rates.
-- Velocity distributions along the scaffold surface.
-- Transport-limited degradation regions.
-- Reaction-limited degradation regions.
+- Local degradation velocities and surface recession rates.
+- Oxygen and zinc tallies, global balances and interface oxygen diagnostics.
 - Time-dependent geometry changes.
 
 ### Implementation
 
 ```text
-physics/interface_velocity.idp
-physics/interface_kinetics.idp
+physics/flux_first.idp
 physics/governing_equations.idp
+physics/interface_kinetics.idp
+physics/interface_velocity.idp   (legacy probe-based path)
 ```
 
 ### References
@@ -929,8 +1001,14 @@ The fluid-flow model is particularly useful for:
 
 ### Activation
 
-Fluid flow can be enabled through `-solve_fluid 1`. When disabled (`-solve_fluid 0`),
+Fluid flow is enabled with `-enable_flow 1` (default 0; `-enable_full_ns` selects the full
+Navier-Stokes form, `-flow_solve_interval` the solve interval). When disabled,
 species transport is governed by diffusion and reaction processes only.
+
+**Validation status.** The flow-coupled degradation mode has not undergone systematic
+experimental validation, and the regression suite does not exercise it. The calibration and
+evaluation reported for v1.1.0 are for static immersion without flow. Treat flow-coupled
+results as unvalidated.
 
 ### Model Outputs
 
@@ -1159,20 +1237,45 @@ Improved Parameter Set
 The calibration workflow aims to identify parameter values that best reproduce
 experimentally observed degradation behaviour.
 
-### Parameters Commonly Calibrated
+### Parameters commonly calibrated
 
-```text
-k_f   : Film formation rate          (35.91 h⁻¹)
-k_d   : Film degradation rate        (27.17 mm⁶ g⁻² h⁻¹)
-k_ORR : Oxygen reduction rate        (0.51 mm h⁻¹)
-```
+Three effective kinetic parameters are calibrated; film porosity and tortuosity, the film
+thickness, the film-barrier parameters and all diffusivities are fixed. The parameter sets
+that appear in this repository are distinguished below.
 
-These three effective kinetic parameters are the only ones calibrated in the
-paper (optimized values in brackets, Table 2); film tortuosity (τ = 2.0), porosity
-and all diffusivities are fixed at literature values.
+**Code defaults** (`config/settings.idp`; command-line defaults, *not* the calibrated values):
 
-Depending on the study, transport coefficients and additional model parameters may
-also be investigated.
+| Parameter | Default | Unit |
+|---|---|---|
+| `k_f` | 3×10⁵ | h⁻¹ |
+| `k_d` | 1×10⁸ | mm⁶ g⁻² h⁻¹ |
+| `k_ORR` | 80 | mm h⁻¹ |
+| `C_O2,0` | 3.5 | mg L⁻¹ |
+| `D_O2`, `D_Zn`, `D_Cl`, `D_OH` | 9.36, 2.7216, 7.776, 20.16 | mm² h⁻¹ |
+| `ε`, `τ`, `δ`, `L_f` | 0.25, 2.0, 1.0, 0.001 mm | – |
+
+**Revised-study calibrated values** (Bayesian optimization, balanced objective):
+
+| Parameter | Search range | Calibrated value | Unit |
+|---|---|---|---|
+| `k_f` | [1×10⁵, 2.5×10⁶] | 4×10⁵ | h⁻¹ |
+| `k_d` | [1×10⁴, 1×10⁸] | 3×10⁶ | mm⁶ g⁻² h⁻¹ |
+| `k_ORR` | [25, 2500] | 200 | mm h⁻¹ |
+
+`k_d` is bounded from above only: the objective is flat below about 10⁶ and rises above
+3×10⁶, and 3×10⁶ is the largest value within 0.5 % of the best objective. The revised study
+fixes `C_O2,0` = 6.2 mg L⁻¹, `D_O2` = 18.72, `D_Zn` = 3.384, `D_Cl` = 9.828 and
+`D_OH` = 25.56 mm² h⁻¹, `ε` = 0.25, `τ` = 2, `L_f` = 1 µm, `Δt` = 4 h and a 24 h
+reinitialization interval, and the film barrier `-film_mech 1` with `β_ref` = 12 µm⁻¹ at `ε` = 0.25,
+`τ` = 2 (`-film_beta_couple 1`). The diffusivities, `C_O2,0` and the film-barrier settings differ from
+the code defaults and must be given on the command line (full command in `INSTALL.md`).
+
+**Unit-converted values** for the calibrated set (as used internally):
+
+| Quantity | Value |
+|---|---|
+| retained share `s = k_f L_f² / D_Zn` | 4×10⁵ × (10⁻³)² / 3.384 = 0.118 |
+| `k_d` in molar form, `k_d / clMolarConv²` | 3×10⁶ / (28 209)² = 3.8×10⁻³ L² mol⁻² h⁻¹ |
 
 ### Available Workflows
 
@@ -1181,17 +1284,17 @@ also be investigated.
 ```text
 Experimental Mass Loss
         ↓
-Nelder-Mead Optimization
+Bayesian Optimization
         ↓
 Updated Parameters
         ↓
 Simulation Re-run
 ```
 
-The paper's parameters were obtained with the Bayesian-optimization workflow
-below (calibrated against Liu et al.'s 14-day r-SBF mass-loss data, minimum
-RMSE 0.042 %), then validated on independent 28-day HBSS immersion data. A
-Nelder-Mead script is not included in this repository.
+The revised study calibrates `k_f`, `k_d` and `k_ORR` against literature mass-loss data
+(Liu et al., 24–336 h) and the 28-day HBSS pure-Zn data (24–672 h) with a balanced
+objective, `sqrt(0.5 RMSE_Liu² + 0.5 RMSE_HBSS²)`. Because the HBSS data enter the
+objective, the HBSS comparison is a fit check and not an independent validation.
 
 **Bayesian Optimization**
 
@@ -1206,9 +1309,9 @@ Simulation Evaluation
 ```
 
 Bayesian optimization improves search efficiency by focusing evaluations in
-promising regions of parameter space. Paper settings: 12-point Latin hypercube
-start, expected-improvement acquisition, 32 evaluations (optimum at iteration
-22), search ranges k_f [1×10⁴, 8×10⁵] h⁻¹, k_d [2×10⁷, 4×10⁸] mm⁶ g⁻² h⁻¹, k_ORR [8, 800] mm h⁻¹.
+promising regions of parameter space. Revised-study settings: Gaussian-process surrogate
+(Matérn 5/2, log₁₀ inputs), 12-point Latin hypercube start, expected-improvement acquisition,
+32 evaluations, search ranges as in the table above.
 
 Implementation: `../Scripts/BO/`
 
@@ -1223,9 +1326,11 @@ Sensitivity Ranking
 ```
 
 Sensitivity studies identify which parameters have the greatest influence on
-degradation predictions. Paper settings: Morris elementary effects, 8 parameters,
-r = 20 trajectories (180 runs), response = mass loss at 168 h. Ranking: dissolved
-O₂ concentration > k_ORR > k_d > D_O2 > k_f; Zn²⁺/Cl⁻/OH⁻ diffusivities negligible.
+degradation predictions. The Morris elementary-effects script in this repository implements
+the 8-parameter design (r = 20 trajectories, 180 runs, response = mass loss at 168 h). The
+ranking for the revised study (reduced model, 10 parameters, 220 runs) is
+C_O2,0 > D_O2 > k_f > k_ORR > D_Zn > porosity > tortuosity > k_d > D_Cl = D_OH = 0 and is
+reported in the Supporting Information.
 
 Implementation: `../Scripts/GSA/sensitivity_morris.py`
 
@@ -1347,8 +1452,8 @@ The framework can be used to investigate:
 - Material screening
 - Benchmarking against experiments
 
-By replacing large numbers of physical degradation experiments with computational
-studies, Dissolve™ can accelerate implant development and design evaluation.
+Within the validated scope (Section 9 and `VALIDATION.md`), computational studies can
+complement physical degradation experiments in implant design evaluation.
 
 ### Research Applications
 

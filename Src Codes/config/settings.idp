@@ -46,6 +46,7 @@ bool adaptMeshRuntime = getARGV("-adapt_mesh_runtime", 0);
 bool reuseRefinedMesh = getARGV("-reuse_refined_mesh", 0);
 real refineThresholdPct = getARGV("-refine_threshold_pct", 5.0);
 
+// paper_v2: ON by default (interval 1.0 h, Table S3). Volume is preserved through the correction below using the exact cut-cell volume.
 bool enableRedistancing = getARGV("-enable_redistance", 1);
 
 // --- Fluid flow ----------------------------------------------------------
@@ -89,7 +90,7 @@ if (saveRatio < 1.0) saveRatio = 1.0;
 int saveIntervalSteps = saveRatio;
 real simDuration = getARGV("-sim_duration", 672.0);
 simDuration += dt;
-real redistanceInterval = getARGV("-redistance_interval", 1.0);
+real redistanceInterval = getARGV("-redistance_interval", 24.0);   // paper_v3b: 24 h (was 1 h). Every-step reinitialisation lowered the Zn flux by 5 % vs no reinitialisation; 24 to 48 h matched it within 1 % (closed-box sweep)
 
 // Adaptive time-stepping: off by default (dtMax defaults to the starting dt,
 // which is a no-op). When -adaptive_dt 1, dt starts at -dt_hours and grows
@@ -114,18 +115,20 @@ bool exportVolume = getARGV("-export_geometry_volume", 1);
 bool exportSurface = getARGV("-export_geometry_surface", 1);
 
 // --- Corrosion-product film (dimensionless) --------------------------------
-real tau = getARGV("-film_tortuosity", 2.00);
+real tau = getARGV("-film_tortuosity", 2.00);   // paper Table 1
 real eps = getARGV("-film_porosity", 0.25);
 real del = getARGV("-film_constrictivity", 1.);
 
 // --- Reaction kinetics (1/hour and mm^3/(g.hour)) --------------------------
-// k_f (film FORMATION rate) and k_d (film DEGRADATION rate), set with -k_f / -k_d.
-real kf = getARGV("-k_f", 125.18);
-real kd = getARGV("-k_d", 39.22);
+// Renamed from k1/k2 to kf/kd (film FORMATION rate, film DEGRADATION rate)
+// to match the naming used in the paper figures. -k_f/-k_d are the current
+// flags; -k1/-k2 are no longer accepted.
+real kf = getARGV("-k_f", 3.0e5);
+real kd = getARGV("-k_d", 1.0e8);
 
 // --- Material densities (g/mm^3) --------------------------------------------
 real znDensity = getARGV("-rho_zn", 0.00714);
-real filmDensity = getARGV("-rho_film", 0.003998);
+real filmDensity = getARGV("-rho_film", 0.005606);   // g/mm3, Table 1: 5.606 g/cm3
 real filmCapacityScale = getARGV("-film_capacity_scale", 1.);
 real filmCapacity = filmDensity * (1 - eps) * filmCapacityScale;
 
@@ -139,10 +142,10 @@ real rhoZnSolid = znDensity;
 real znBoundaryConc = getARGV("-zn_boundary_conc", 1.00e-5);        // g/mm^3
 
 // --- Diffusion coefficients (mm^2/hour) -------------------------------------
-real diffZn = getARGV("-diff_zn", 3.38);
-real diffCl = getARGV("-diff_cl", 9.7);
-real diffOH = getARGV("-diff_oh", 25.45);
-real diffO2 = getARGV("-diff_o2", 10.8);
+real diffZn = getARGV("-diff_zn", 2.7216);   // mm2/h, Table 1: 7.56e-4 mm2/s
+real diffCl = getARGV("-diff_cl", 7.776);    // mm2/h, Table 1: 2.16e-3 mm2/s
+real diffOH = getARGV("-diff_oh", 20.16);    // mm2/h, Table 1: 5.60e-3 mm2/s
+real diffO2 = getARGV("-diff_o2", 9.36);     // mm2/h, Table 1: 2.60e-3 mm2/s
 
 // --- Initial species concentrations (g/mm^3) --------------------------------
 real cl0 = getARGV("-cl0", 5.043e-6);
@@ -186,23 +189,30 @@ real o2ToMolar   = o2MolarFix ? 1.0 / o2MolarMass : 1.0;  // multiply O2 [g/mm^3
 // -conservative 2: v = v_ORR evaluated at the interface only. The Robin O2 sink already encodes the diffusion limit (O2 at the
 //   interface is depressed when supply is slow), so the min() is redundant; with v = v_ORR the O2 consumed, the Zn released and the
 //   metal lost are tied stoichiometrically by construction.
-int consMode = getARGV("-conservative", 0);
+// v1.1.0 defaults: -flux_first 1 -v_picard 0 -conservative 2 -oh_fix 1 (flux-first coupling with molar-consistent OH- sources).
+// -flux_first 0 selects the superseded probe-based formulation (legacy; reproduction of earlier results only); -conservative 0|1 are legacy modes.
+int consMode = getARGV("-conservative", 2);
+int fluxFirst = getARGV("-flux_first", 1);   // 1 (default): solve O2 first, derive v from the removed flux (conservative projection); requires -v_picard 0 -conservative 2. 0 = superseded probe-based formulation
 int conservative = (consMode > 0);
 real znSat = getARGV("-zn_sat", 5.7e-8);         // g/mm^3 (57 mg/L), used only when conservative=1
-int ohFix = getARGV("-oh_fix", 0);
+int ohFix = getARGV("-oh_fix", 1);   // 1 (default): OH- sources on a molar basis (mol/L). 0 = legacy factors 2 and 4 applied to mass-based fluxes (not unit-consistent)
 // -film_mode 1 (needs -conservative 2): the corrosion-product film is an INTERFACE state theta in [0,1] (coverage), not a volumetric field.
 //   d(theta)/dt = k_f*rho_Zn*|v|/m_film*(1-theta) - k_d*theta*(Cl[mol/L])^2 ; m_film = filmCapacity*filmThick [g/mm^2 at theta = 1]
 //   k_f = fraction of the Zn released that precipitates in place (dimensionless); k_d [L^2 mol^-2 h^-1] as before.
 //   Zn source = rho_Zn*|v| - m_film*dtheta/dt (precipitated Zn withdrawn, dissolved film returned: Zn conserved exactly).
 //   The film blocks the ORR: k_ORR_eff = k_ORR*((1-theta) + theta*del*eps/tau) (same constriction/porosity/tortuosity factor as Eq. 12).
-int filmMode = getARGV("-film_mode", 0);
-real filmThick = getARGV("-film_thickness", 0.005);   // mm, film thickness at full coverage
+int filmMode = getARGV("-film_mode", 1);
+real filmThick = getARGV("-film_thickness", 0.001);   // mm, film thickness at full coverage
 // Unit switches for the surface film (film_mode 1). -kf_rate_units 1: -k_f is a rate in 1/h, share = k_f*delta_f^2/D_Zn
 // (thin-film reduction: C_Zn at the surface = rho_Zn|v| delta_f/D_Zn). -kd_mass_units 1: -k_d is in mm^6 g^-2 h^-1 with Cl in g/mm^3
 // (internally divided by clMolarConv^2 because the dissolution term squares the molar Cl).
-int kfRateUnits = getARGV("-kf_rate_units", 0);
-int kdMassUnits = getARGV("-kd_mass_units", 0);
-real kfShare = kfRateUnits ? kf*filmThick*filmThick/diffZn : kf;
+int kfRateUnits = getARGV("-kf_rate_units", 1);
+int kdMassUnits = getARGV("-kd_mass_units", 1);
+// The thin-film reduction k_f*delta_f^2/D_Zn is a Damkohler-like capture share.
+// It is valid in the small-Da regime; precipitation cannot exceed all Zn oxidized,
+// so bound the retained fraction to [0,1] before it enters the mass balance.
+real kfShareRaw = kfRateUnits ? kf*filmThick*filmThick/diffZn : kf;
+real kfShare = max(0.0, min(1.0, kfShareRaw));
 real kdUse = kdMassUnits ? kd/(clMolarConv*clMolarConv) : kd;
 // -medium_reset_hours H (>0): every H hours the electrolyte is renewed -- dissolved Zn -> 0, Cl and OH back to their initial values, O2 back to the
 // saturation value (all in the liquid); the metal and the surface film (theta / F) are NOT touched. The Zn removed is accumulated in znRemovedCum.
@@ -210,7 +220,15 @@ real mediumResetHours = getARGV("-medium_reset_hours", 0.0);
 real filmMolarMass = 81.38;                              // g/mol (ZnO-type film)
 real filmMass = filmCapacity * filmThick * 65.38 / filmMolarMass;   // Zn-equivalent mass per area at theta = 1 [g Zn/mm^2] = Gamma_f*M_Zn
 real znMolarMass = 65.38;                        // g/mol
-real kORR = getARGV("-k_orr", 0.0144);
+// ---- Volumetric (legacy Eq. 11-12) film with the v4 unit conversions ----
+// -vol_film_units 1: (i) the film field F is stored as Zn-EQUIVALENT mass so that Zn removed by precipitation = film gained (exact 1:1 bookkeeping), and its
+// saturation capacity is the ZnO capacity times M_Zn/M_film; (ii) the chloride-mediated dissolution uses the v4 mass-unit constant kdUse
+// (kd [mm^6 g^-2 h^-1] on Cl [g mm^-3]) instead of the legacy raw kd on molar Cl. 0 keeps the legacy definitions exactly.
+int volFilmUnits = getARGV("-vol_film_units", 0);
+real fluxProjTol = getARGV("-flux_proj_tol", 1.0e-4);   // largest allowed relative mismatch between the projected Zn flux and the oxygen sink before the exact scale correction; larger values fail closed
+real filmCapVol = volFilmUnits ? filmCapacity*znMolarMass/filmMolarMass : filmCapacity;
+real kdVol = volFilmUnits ? kdUse : kd;
+real kORR = getARGV("-k_orr", 80.0);
 int useORR = getARGV("-use_orr", 1);
 
 // O2 under-relaxation, applied in numerics/timestep_solver.idp as
@@ -226,11 +244,11 @@ int useORR = getARGV("-use_orr", 1);
 //   omega(dt) = 1 - (1 - omegaRef)^(dt/refDt)
 // At dt == o2RelaxRefDt this returns omegaRef exactly, so the existing
 // dt=1h dataset remains bit-identical.
-real o2RelaxOmega = getARGV("-o2_relax_omega", 0.3);
+real o2RelaxOmega = getARGV("-o2_relax_omega", 1.0);
 real o2RelaxRefDt = getARGV("-o2_relax_ref_dt", 1.0);
 // Escape hatch: set 0 to restore the old dt-dependent behaviour (for
 // reproducing pre-fix runs), 1 (default) for the dt-consistent scaling.
-bool o2RelaxScaleWithDt = getARGV("-o2_relax_scale_dt", 1);
+bool o2RelaxScaleWithDt = getARGV("-o2_relax_scale_dt", 0);
 
 // Velocity-extension scheme for the interface-velocity finite differences
 // (physics/interface_velocity.idp).
@@ -246,8 +264,8 @@ bool o2RelaxScaleWithDt = getARGV("-o2_relax_scale_dt", 1);
 // it -> vO2Diff=0 -> v=0. That left the interface velocity essentially
 // undefined everywhere except within h of the surface, which is why the
 // measured interface barely moved at any h (tested 0.002 - 3.0mm, 2026-08-14).
-// Default stays 0 so existing runs are unchanged until this is validated.
-int velExtension = getARGV("-vel_extension", 0);
+// Legacy probe-based path only (-flux_first 0); the default is 1.
+int velExtension = getARGV("-vel_extension", 1);
 
 // Diagnostic: drop the Zn-transport branch from v = max(vZn, vO2) so that
 // v = vO2 alone. See physics/interface_velocity.idp -- isolates whether a
@@ -259,7 +277,7 @@ int useVZn = getARGV("-use_vzn", 1);
 // return 0 when the probe lands far from the node's own element), 1 = robust
 // search. Matters once -vel_extension 1 makes probe offsets ~mm rather than
 // the legacy 0.002mm.
-int probeSearchMethod = getARGV("-search_method", 0);
+int probeSearchMethod = getARGV("-search_method", 1);
 
 // Diagnostic: force the interface velocity to a known uniform value in the
 // band (see physics/interface_velocity.idp). Used to verify the level-set
@@ -310,3 +328,37 @@ string petscNsParams = "-ksp_monitor -ksp_type fgmres -ksp_converged_reason "
                 + "-pc_fieldsplit_schur_fact_type full";
 
 ENDIFMACRO//
+
+// Legacy probe-based path only (-flux_first 0): semi-implicit velocity (Picard passes). -v_picard N repeats the level-set + species solve N extra
+// times per step, with the recession velocity evaluated from the end-of-step O2 (weight -v_picard_w, 1 = fully implicit) instead of the
+// start-of-step O2. Default 0 (no passes), which -flux_first 1 requires: the flux-first update performs one oxygen solve and one recession update per step.
+int vPicard = getARGV("-v_picard", 0);
+real vPicardW = getARGV("-v_picard_w", 1.0);
+
+// paper_v2: length scale of the reinitialisation volume correction (per-call cap 0.2*hRedist, cumulative cap 3*hRedist). It used to be the probe distance h,
+// which made the correction vanish once the probe sits on the interface.
+real hRedist = getARGV("-h_redist", 0.05);
+
+// paper_v3: the film (interface state theta, film mode 1) acts as an explicit series resistance on the oxygen flux, not as a multiplier delta*eps/tau on k_ORR:
+//   1/k_eff = 1/k_ORR + L_f/D_f,  L_f = theta*filmThick (mass-limited thickness at full coverage), D_f = D_O2*del*eps/tau (Table 1: eps 0.25, tau 2; del = constrictivity)
+//   sinkMult = k_eff/k_ORR = 1/(1 + k_ORR*theta*filmThick/(D_O2*del*eps/tau)).  -film_resistance 0 restores the old multiplier 1 - theta*(1 - del*eps/tau).
+int filmResMode = getARGV("-film_resistance", 1);
+
+// paper_v3b: reinitialisation volume-correction tolerance (relative) and maximum correction iterations. The old fixed 1e-6 left a systematic
+// -1e-4 mm3 per call (about 7 % of the closed-box physical loss over 42 calls).
+real redistTol = getARGV("-redist_tol", 1.0e-9);
+int  redistMaxCorr = getARGV("-redist_max_corr", 40);
+// paper_v3b: the smoothed-Heaviside mass-loss file is NOT invariant to reinitialisation (0.40 % vs 0.04 % for the same closed box) and is no longer written
+// unless -write_smooth_mass 1. Use mass_loss.txt (exact cut-cell volume + flux tally + reinitialisation volume change).
+int writeSmoothMass = getARGV("-write_smooth_mass", 0);
+
+// -film_mech 2 uses uncapped retained-product thickness L=theta*filmThick in the existing series resistance.
+// It keeps epsilon, tau, constrictivity and Table 1 diffusivities fixed; no beta term is used. Optional variant; not the default.
+int filmMech = getARGV("-film_mech", 0);
+real filmBeta = getARGV("-film_beta", 3.36);          // 1/um
+real filmBetaCouple = getARGV("-film_beta_couple", 0);        // 1: beta_eff = beta * (tau/eps) / (tauRef/epsRef)  (barrier exponent follows tortuous path per open area)
+real filmBetaTauRef = getARGV("-film_beta_tau_ref", 2.0);       // reference tortuosity at which -film_beta was calibrated (Table 1)
+real filmBetaEpsRef = getARGV("-film_beta_eps_ref", 0.25);      // reference porosity at which -film_beta was calibrated (Table 1)
+real filmBetaEff = filmBetaCouple ? filmBeta*(tau/eps)/(filmBetaTauRef/filmBetaEpsRef) : filmBeta;
+real thetaMax = (filmMech == 1 || filmMech == 2) ? 1.0e6 : 1.0;
+

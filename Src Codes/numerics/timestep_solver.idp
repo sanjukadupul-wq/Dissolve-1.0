@@ -19,7 +19,7 @@ if (enableLevelSet)
 
 if (enableRedistancing)
 {
-  if (t >= nextRedistanceTime)
+  if (t >= nextRedistanceTime && pic == vPicard)
   {
     if (mpirank == 0)
       print("Redistancing the distance function...")
@@ -27,9 +27,20 @@ if (enableRedistancing)
     // Volume BEFORE reinitialization -- direct check (2026-08-14) of
     // whether distance()/restrict() is volume-preserving, per the huge
     // with/without redistancing mass-loss discrepancy found today.
-    real volBeforeLoc = intN(MeshNoOverlap)((phi > 0));
+    real volBeforeLoc = cutVolume(MeshNoOverlap, phi);
     real volBeforeGlob = 0;
     mpiAllReduce(volBeforeLoc, volBeforeGlob, mpiCommWorld, mpiSUM);
+
+    // Flux-first film coverage is an areal inventory. Redistancing changes
+    // the zero-level-set geometry without changing the physical surface; a
+    // plain P1 carry can therefore create/delete integrated film Zn. Capture
+    // the pre-redistance inventory so it can be conservatively remapped below.
+    real filmZnBeforeLoc=0.0, filmZnBeforeGlob=0.0;
+    if (fluxFirst && filmMode)
+    {
+      filmZnBeforeLoc = int2d(MeshNoOverlap, levelset=phi)(theta*filmMass);
+      mpiAllReduce(filmZnBeforeLoc, filmZnBeforeGlob, mpiCommWorld, mpiSUM);
+    }
 
     fespace SpaceBackup(MeshBackup, Pk);
     SpaceBackup phiG, phiReduce;
@@ -49,13 +60,13 @@ if (enableRedistancing)
     // distance() runs. MeshBackup is a fully-replicated (non-partitioned)
     // mesh -- every rank now holds the complete summed field, so this is
     // already a global volume, no further mpiAllReduce needed.
-    real V1 = intN(MeshBackup)((phiReduce > 0));
+    real V1 = cutVolume(MeshBackup, phiReduce);
 
     distance(MeshBackup, phiReduce, phiG[]);
 
     // Stage V2: after distance(), still on MeshBackup, BEFORE projecting
     // back onto the original mesh/space.
-    real V2 = intN(MeshBackup)((phiG > 0));
+    real V2 = cutVolume(MeshBackup, phiG);
 
     // Volume correction (2026-09-02, hardened iterative version):
     // distance() is not exactly volume-preserving -- confirmed real (not a
@@ -94,10 +105,10 @@ if (enableRedistancing)
     // this block supersedes it.)
     real Vtarget = volBeforeGlob;
     real omega = 0.5;                  // relaxation factor
-    int  maxCorrSteps = 15;
-    real relTol = 1e-6;
-    real maxShiftPerStep = 0.20 * h;   // within the 0.10-0.25*h_local band
-    real maxTotalShift   = 3.0 * h;    // hard cap on cumulative displacement
+    int  maxCorrSteps = redistMaxCorr;
+    real relTol = redistTol;
+    real maxShiftPerStep = 0.20 * hRedist;   // within the 0.10-0.25*h_local band
+    real maxTotalShift   = 3.0 * hRedist;    // hard cap on cumulative displacement
 
     real deltaTotal = 0.0;
     real Vcur = V2;
@@ -130,7 +141,7 @@ if (enableRedistancing)
 
       phiG[] += (deltaTrial - deltaTotal);
       deltaTotal = deltaTrial;
-      Vcur = intN(MeshBackup)((phiG > 0));
+      Vcur = cutVolume(MeshBackup, phiG);
       real residNew = Vtarget - Vcur;
 
       // a sign change between the previous and new residual brackets the
@@ -185,6 +196,31 @@ if (enableRedistancing)
     // Pure index gather: no interpolation, exact by construction.
     for[i, v : rst] phi[][i] = phiReduce[][v];
 
+    // Account for film inventory change caused by redistancing/remapping.
+    // The geometric operation is not a chemical reaction: any change in
+    // integrated film Zn is transferred with opposite sign to dissolved Zn.
+    if (fluxFirst && filmMode)
+    {
+      real filmZnAfterLoc=int2d(MeshNoOverlap, levelset=phi)(theta*filmMass);
+      real filmAreaLoc=int2d(MeshNoOverlap, levelset=phi)(1.0);
+      real filmZnAfterGlob=0.0, filmAreaGlob=0.0;
+      mpiAllReduce(filmZnAfterLoc,filmZnAfterGlob,mpiCommWorld,mpiSUM);
+      mpiAllReduce(filmAreaLoc,filmAreaGlob,mpiCommWorld,mpiSUM);
+      real filmRemapDelta=filmZnAfterGlob-filmZnBeforeGlob;
+      if (filmAreaGlob > 1.0e-12)
+      {
+        // Positive delta means the remap created stored film Zn, so remove
+        // the same amount from the dissolved-Zn source; negative returns it.
+        znNetSource = znNetSource - filmRemapDelta/(filmAreaGlob*dt);
+        if (mpirank==0) cout << "DEBUG_FILM_REINIT_REMAP t=" << t << " before=" << filmZnBeforeGlob << " after=" << filmZnAfterGlob << " delta=" << filmRemapDelta << endl;
+      }
+      else if (filmZnBeforeGlob > 1.0e-20)
+      {
+        if (mpirank==0) cout << "ERROR_FILM_REINIT_ZERO_AREA_WITH_FILM mass=" << filmZnBeforeGlob << endl;
+        exit(4);
+      }
+    }
+
     nextRedistanceTime += redistanceInterval;
 
     // Apples-to-apples check: measure the post-gather volume with the SAME
@@ -197,9 +233,10 @@ if (enableRedistancing)
     // went through `scaffold` at all) and must never be used to judge
     // whether a run's mass-loss curve is trustworthy -- read dV_distance
     // (now corrected to ~0, see the volCorrection block above) instead.
-    real volAfterDirectLoc = intN(MeshNoOverlap)((phi > 0));
+    real volAfterDirectLoc = cutVolume(MeshNoOverlap, phi);
     real volAfterDirectGlob = 0;
     mpiAllReduce(volAfterDirectLoc, volAfterDirectGlob, mpiCommWorld, mpiSUM);
+    reinitDVCum += (volAfterDirectGlob - volBeforeGlob);
 
     scaffold = (phi > 0);
     loc = intN(MeshNoOverlap)(scaffold);
@@ -270,7 +307,7 @@ if (enableFilmEquation)
   if (mpirank==0) { printElapsedTime }
 }
 
-if (enableO2Equation)
+if (enableO2Equation && !fluxFirst)   // flux-first solves O2 earlier in the step (physics/flux_first.idp)
 {
   if (mpirank==0) { print("Solving O2 concentration equation (ORR)..."); setCPUTime }
 

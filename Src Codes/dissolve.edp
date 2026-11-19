@@ -1,3 +1,7 @@
+// CUT-CELL VOLUME (paper_v2): volume of {phi>0} integrated exactly through the cut elements (piecewise-linear phi) instead of the sharp (phi>0)
+// count at quadrature points. The sharp count only changes in whole-element steps, so it cannot follow interface motion of 1e-5 mm/h and made the
+// reinitialisation volume correction undo real motion (same fix as the frozen A3_cutcell_v1 solver).
+macro cutVolume(Th, ph) int3d(Th, levelset=-(ph))(1.) //
 // dissolve.edp
 // Entry point for Dissolve — a reaction-diffusion + level-set solver for
 // degradation of Zn-alloy scaffolds/implants, driven by ORR surface kinetics.
@@ -11,6 +15,28 @@ include "config/dependencies.idp"
 
 // 2. Simulation, material, geometry, and solver settings
 include "config/settings.idp"
+
+// Flux-first performs one implicit oxygen solve and one recession update per step.
+// Multiple Picard passes would repeat the cumulative tallies and move film twice.
+if (fluxFirst && vPicard != 0)
+{
+  if (mpirank == 0) cout << "ERROR_FLUXFIRST_REQUIRES_V_PICARD_0" << endl;
+  exit(2);
+}
+if (fluxFirst && (!enableO2Equation || consMode != 2))
+{
+  if (mpirank == 0) cout << "ERROR_FLUXFIRST_REQUIRES_O2_AND_CONSERVATIVE_MODE_2" << endl;
+  exit(2);
+}
+
+if (mpirank == 0)
+{
+  cout << "DISSOLVE_VERSION v1.1.0" << endl;
+  cout << "DISSOLVE_ARGS";
+  for (int ia = 0; ia < ARGV.n; ia++) cout << " " << ARGV[ia];
+  cout << endl;
+}
+
 
 // 3. Shared macros and helper functions
 include "utils/helpers.idp"
@@ -83,6 +109,7 @@ real[int] nsRhs(SpaceVector.ndof);
 // elapsed time (not just simulated hours) matters for a job that can run
 // for days.
 real simStartTime = mpiWtime();
+real o2InventoryInitial = 0.0;  // liquid-phase oxygen inventory at t=0 for the global balance output
 
 // ---------------------------------------------------------------------------
 // Main time-stepping loop
@@ -102,10 +129,10 @@ for (real t = restartT; t < simDuration; t += dt)
   // -- Track remaining scaffold volume for this step -------------------
   loc = 0;
   IFMACRO(intN)
-    loc = intN(MeshNoOverlap)(phi > 0);
+    loc = cutVolume(MeshNoOverlap, phi);
   ENDIFMACRO
   IFMACRO(!intN)
-    loc = int3d(MeshNoOverlap)(phi > 0);
+    loc = cutVolume(MeshNoOverlap, phi);
   ENDIFMACRO
 
   glob = 0;
@@ -118,14 +145,7 @@ for (real t = restartT; t < simDuration; t += dt)
     if (mpirank == 0) print("Initial volume (initialVolume): " + initialVolume);
   }
 
-  {
-    real o2SinkLoc = int2d(MeshNoOverlap, levelset=phi)(kORR*sinkRatio*O2);
-    real znSrcLoc  = int2d(MeshNoOverlap, levelset=phi)(znDensity*(-v));
-    real o2SinkGlob = 0, znSrcGlob = 0;
-    mpiAllReduce(o2SinkLoc, o2SinkGlob, mpiCommWorld, mpiSUM);
-    mpiAllReduce(znSrcLoc, znSrcGlob, mpiCommWorld, mpiSUM);
-    if (t > 0) { o2SinkCum += o2SinkGlob*dt; znSrcCum += znSrcGlob*dt; }
-  }
+  // paper_v3b: the O2-sink and Zn-source tallies are accumulated at the END of each step (below), before any medium renewal resets the oxygen field.
 
   if (mpirank == 0)
   {
@@ -160,8 +180,52 @@ for (real t = restartT; t < simDuration; t += dt)
   include "io/checkpoint_write.idp"
 
   // -- Advance the interface and field solutions --------------------------
-  include "physics/interface_velocity.idp"
-  include "numerics/timestep_solver.idp"
+  O2vel = O2;   // pass 0: velocity from the start-of-step oxygen (frozen v4 behaviour)
+  thetaVel = theta;   // film coverage seen by the oxygen sink and the velocity
+  SpaceP1 phiS = phi, FS = F, ZnS = Zn, ClS = Cl, OHS = OH, O2S = O2, thS = theta;
+  for (int pic = 0; pic <= vPicard; pic++)
+  {
+    if (pic > 0)
+    {
+      O2vel = vPicardW*O2 + (1.0 - vPicardW)*O2S;   // oxygen at the end of the previous pass
+      thetaVel = theta;   // end-of-step coverage of the previous pass
+      phi = phiS; F = FS; Zn = ZnS; Cl = ClS; OH = OHS; O2 = O2S; theta = thS;
+    }
+    if (fluxFirst) { include "physics/flux_first.idp" }
+    if (!fluxFirst) { include "physics/interface_velocity.idp" }
+    include "numerics/timestep_solver.idp"
+    {   // per-pass diagnostics for the semi-implicit coupling: compare the last two passes (only used with -v_picard > 0)
+      real aLp = int2d(MeshNoOverlap, levelset=phi)(1.0);
+      real sLp = int2d(MeshNoOverlap, levelset=phi)(kORR*sinkRatio*sinkMult*O2);
+      real vLp = int2d(MeshNoOverlap, levelset=phi)(-v);
+      real tLp = int2d(MeshNoOverlap, levelset=phi)(theta);
+      real aGp = 0, sGp = 0, vGp = 0, tGp = 0;
+      mpiAllReduce(aLp, aGp, mpiCommWorld, mpiSUM);
+      mpiAllReduce(sLp, sGp, mpiCommWorld, mpiSUM);
+      mpiAllReduce(vLp, vGp, mpiCommWorld, mpiSUM);
+      mpiAllReduce(tLp, tGp, mpiCommWorld, mpiSUM);
+      if (mpirank == 0 && vPicard > 0)
+        cout << "DEBUG_PICARD t=" << t << " pass=" << pic << " sink=" << sGp << " vmean=" << (vGp/(aGp+1e-30)) << " theta=" << (tGp/(aGp+1e-30)) << endl;
+    }
+  }
+  if (!fluxFirst) {   // paper_v3b: tallies from the end-of-step fields (flux-first tallies on the current interface inside physics/flux_first.idp) (O2, theta, v of the final pass), BEFORE the renewal block can reset O2
+    real o2SinkLoc = int2d(MeshNoOverlap, levelset=phi)(kORR*sinkRatio*sinkMult*O2);
+    real znSrcLoc  = int2d(MeshNoOverlap, levelset=phi)(znDensity*(-v));
+    real o2SinkGlob = 0, znSrcGlob = 0;
+    mpiAllReduce(o2SinkLoc, o2SinkGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(znSrcLoc, znSrcGlob, mpiCommWorld, mpiSUM);
+    real auditO2VelPostLoc = int2d(MeshNoOverlap, levelset=phi)(kORR*sinkRatio*sinkMult*O2vel);
+    real auditZnExpectedLoc = int2d(MeshNoOverlap, levelset=phi)(znDensity*(-v));
+    real auditO2VelPostGlob=0, auditZnExpectedGlob=0;
+    mpiAllReduce(auditO2VelPostLoc, auditO2VelPostGlob, mpiCommWorld, mpiSUM);
+    mpiAllReduce(auditZnExpectedLoc, auditZnExpectedGlob, mpiCommWorld, mpiSUM);
+    if (mpirank == 0)
+      cout << "DEBUG_FLUX_POST t=" << t+dt
+           << " ZnPerO2Current=" << znSrcGlob/max((2.0*znMolarMass/o2MolarMass)*o2SinkGlob,1e-30)
+           << " ZnPerO2VelocityState=" << auditZnExpectedGlob/max((2.0*znMolarMass/o2MolarMass)*auditO2VelPostGlob,1e-30)
+           << " O2VelocityStateOverCurrent=" << auditO2VelPostGlob/max(o2SinkGlob,1e-30) << endl;
+    o2SinkCum += o2SinkGlob*dt; znSrcCum += znSrcGlob*dt;
+  }
   include "numerics/mesh_refinement.idp"
 
   // optional medium renewal (see -medium_reset_hours)
@@ -200,10 +264,10 @@ for (real t = restartT; t < simDuration; t += dt)
   {
     loc = 0;
     IFMACRO(intN)
-      loc = intN(MeshNoOverlap)(phi > 0);
+      loc = cutVolume(MeshNoOverlap, phi);
     ENDIFMACRO
     IFMACRO(!intN)
-      loc = int3d(MeshNoOverlap)(phi > 0);
+      loc = cutVolume(MeshNoOverlap, phi);
     ENDIFMACRO
     glob = 0;
     mpiAllReduce(loc, glob, mpiCommWorld, mpiSUM);

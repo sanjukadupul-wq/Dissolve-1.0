@@ -12,9 +12,9 @@ software installed alongside Dissolve™.
 
 | Software | Version | Purpose in Dissolve™ | License | Website |
 |---|---|---|---|---|
-| **FreeFEM** | 4.14 | Primary multiphysics finite-element platform supporting the Dissolve™ degradation simulation engine. | LGPL v3 | <https://freefem.org> |
-| **PETSc** | Included with FreeFEM installation | Parallel solver infrastructure providing scalable numerical solution of large sparse systems arising from transport, reaction, and interface-evolution equations. | BSD 2-Clause | <https://petsc.org> |
-| **OpenMPI** | Included with FreeFEM installation | Distributed-memory parallel computing framework used for high-performance execution across multi-core and cluster computing environments. | BSD 3-Clause | <https://www.open-mpi.org> |
+| **FreeFEM** | 4.12 (tested for v1.1.0) | Primary multiphysics finite-element platform supporting the Dissolve™ degradation simulation engine. | LGPL v3 | <https://freefem.org> |
+| **PETSc** | 3.18.2 (bundled with the tested FreeFEM image) | Parallel solver infrastructure providing scalable numerical solution of large sparse systems arising from transport, reaction, and interface-evolution equations. | BSD 2-Clause | <https://petsc.org> |
+| **MPI (MPICH or OpenMPI)** | MPICH 4.0.2 (bundled with the tested FreeFEM image) | Distributed-memory parallel computing framework used for high-performance execution across multi-core and cluster computing environments. | MPICH: BSD-style; OpenMPI: BSD 3-Clause | <https://www.mpich.org>, <https://www.open-mpi.org> |
 
 ## Meshing and Geometry
 

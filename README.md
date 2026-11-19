@@ -2,6 +2,10 @@
 
 > **DISSOLVE** = **D**egradation **I**n-**S**ilico **SOLVE**r
 
+> **Release notice (v1.1.0).** v1.1.0 substantially revises the interface–oxygen coupling and
+> the mass accounting of the solver. Results obtained with v1.0.x are not expected to be
+> reproduced by v1.1.0. The v1.0.1 release is unchanged. See [`CHANGELOG.md`](CHANGELOG.md).
+
 Dissolve™ is a high-fidelity computational platform for predicting degradation of
 biodegradable zinc-based implants and porous scaffolds in physiological environments.
 Built on a 3D reaction-diffusion and level-set framework using FreeFEM++, MPI, and
@@ -39,15 +43,17 @@ development activities, including:
 - Corrosion and degradation assessment
 - Digital prototyping and virtual testing
 - Research and industrial R&D workflows
-- Regulatory and preclinical simulation studies
+- Research-stage assessment of biodegradable implant designs
 
 ## Validation and Calibration
 
-The solver has been systematically calibrated and validated against controlled 28-day
-HBSS immersion experiments of pure Zn, with ongoing verification across multiple
-implant geometries and degradation conditions. Validation workflows include
-degradation kinetics, mass-loss evolution, and sensitivity analysis to ensure
-predictive reliability across a range of biodegradable zinc-alloy applications.
+The solver was calibrated against literature mass-loss data and a 28-day HBSS immersion
+dataset of pure Zn (balanced objective), so the HBSS comparison is a fit check and not an
+independent validation. Evaluation is limited to the tested
+material, geometry, medium and exposure conditions; applying the solver to other materials,
+geometries or environments requires its own verification. Calibration and sensitivity
+workflows cover degradation kinetics, mass-loss evolution and sensitivity analysis.
+Regression and mass-balance tests are provided in [`Src Codes/tests/`](Src%20Codes/tests/).
 
 ## Software Architecture
 
@@ -72,7 +78,7 @@ The source code is organized into modular components covering:
 
 ## Developer
 
-**Henaka Ariyarathna**
+**Henaka Ariyarathna**  
 Computational Modelling and Biodegradable Implant Design
 
 *Accelerating the design of next-generation biodegradable implants through
@@ -85,7 +91,6 @@ physics-based virtual degradation testing.*
 | [`Src Codes/`](Src%20Codes/) | Core Dissolve™ simulation engine and supporting modules. Contains the FreeFEM++ degradation solver (`dissolve.edp`) together with modular implementations for configuration management, computational domains, state variables, physics models, numerical methods, input/output, and utility functions. Also includes calibration and parameter-identification workflows. See its own [README](Src%20Codes/README.md) for the module map, **[`INSTALL.md`](Src%20Codes/INSTALL.md)** for installation, and **[`THEORY.md`](Src%20Codes/THEORY.md)** for the theoretical background. |
 | [`Mesh Generation/`](Mesh%20Generation/) | Automated geometry and meshing workflows for biodegradable implant simulations. Includes tools for generating cylinders, TPMS structures (Gyroid, Schwarz-P, Diamond), strut lattices (BCC, FCC), and a multi-ring coronary stent, across a range of porosities. The pipeline converts implicit geometry definitions into watertight surfaces and high-quality tetrahedral finite-element meshes compatible with Dissolve™. |
 | [`Scripts/`](Scripts/) | Calibration, sensitivity and uncertainty tooling, in subfolders: [`BO/`](Scripts/BO/) (Bayesian optimization of k_f / k_d / k_ORR: the Python scripts of the final mass-loss BO), [`GSA/`](Scripts/GSA/) (`sensitivity_morris.py`, Morris global sensitivity) and [`Uncertainty/`](Scripts/Uncertainty/) (`compute_95ci.py`, bootstrap 95 % intervals on the calibrated parameters). See [`Src Codes/README.md`](Src%20Codes/README.md#calibration-and-analysis-tools) for how each script is invoked. |
-| [`Results/`](Results/) | Reference simulation outputs, validation datasets, and benchmark studies. Includes experimental degradation measurements and corresponding computational predictions used to assess model performance across different degradation scenarios and implant geometries. |
 | [`Third-Party Software/`](Third-Party%20Software/) | Summary of external software, libraries, and dependencies used throughout the Dissolve™ ecosystem, including version information, licensing details, and reference links. |
 
 ## Key Repository Components
@@ -93,7 +98,6 @@ physics-based virtual degradation testing.*
 - **Physics-Based Degradation Solver** for biodegradable metallic implants.
 - **Automated Mesh Generation Pipeline** for complex lattice and TPMS geometries.
 - **Calibration & Validation Frameworks** for predictive model development.
-- **Benchmark Experimental Datasets** for verification studies.
 - **High-Performance Computing Support** through MPI and PETSc.
 - **Extensive Documentation** covering theory, installation, and usage.
 
@@ -128,12 +132,16 @@ Launch a simulation from the solver directory:
 
 ```bash
 cd "Src Codes"
-ff-mpirun -np 4 dissolve.edp \
+mpirun -np 4 FreeFem++-mpi -nw dissolve.edp -v 0 \
   -input_mesh path/to/your.mesh \
-  -sim_duration 672
+  -flux_first 1 -v_picard 0 -conservative 2 -oh_fix 1 \
+  -dt_hours 4 -sim_duration 672 \
+  -results_file output/result.txt
 ```
 
-This example executes a 672-hour degradation simulation using four MPI processes.
+This example executes a 672-hour degradation simulation using four MPI processes in the
+v1.1.0 solver mode (`-flux_first 1 -v_picard 0 -conservative 2 -oh_fix 1`, the defaults; see
+[Solver modes](Src%20Codes/README.md#solver-modes)). Mesh paths must not contain spaces.
 Solver behavior, material parameters, transport properties, boundary conditions, and
 output options can be configured through the input files and runtime parameters
 described in the documentation.
@@ -158,33 +166,30 @@ scaffold simulations.
 
 Dissolve™ is built on a robust scientific-computing ecosystem including:
 
-- FreeFEM++
-- PETSc
-- MPI
+- FreeFEM with PETSc and MPI (tested for v1.1.0: FreeFEM 4.12, PETSc 3.18.2, MPICH 4.0.2; see [`Src Codes/INSTALL.md`](Src%20Codes/INSTALL.md))
 - Gmsh
 - ParaView
-- Python Scientific Stack
-- Slurm Workload Manager
-- Apptainer / Singularity
+- Python scientific stack
+- Slurm Workload Manager (HPC use)
+- Apptainer / Singularity (containerised HPC use)
 
-A complete list of third-party software, version requirements, licensing information,
-and installation guidance is provided in
+A complete list of third-party software, versions, licences and installation guidance is
+provided in
 [`Third-Party Software/README.md`](Third-Party%20Software/README.md).
 
 ## License
 
 Dissolve™ is released under the **GNU General Public License v3.0 (GPL-3.0)**.
 
-You are free to use, study, modify, and redistribute this software under the terms of
-the GPL v3 license. Any derivative works distributed to third parties must also be
-released under GPL-compatible terms and accompanied by the corresponding source code.
+You are free to use, study, modify and redistribute this software under the terms of the
+GPL v3. Derivative works distributed to third parties must also be released under
+GPL-compatible terms and accompanied by the corresponding source code.
 
-A copy of the full license is provided in the repository's [`LICENSE`](LICENSE) file.
+The full licence text is in the repository's [`LICENSE`](LICENSE) file.
 
 ### Copyright
 
-© 2026 Henaka Ariyarathna. All rights reserved except as granted under the GNU General
-Public License v3.0.
+© 2026 Henaka Ariyarathna. Released under the GNU General Public License v3.0.
 
 ### Disclaimer
 

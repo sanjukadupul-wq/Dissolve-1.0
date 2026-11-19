@@ -37,7 +37,7 @@ func int printHeader()
 	cout<<"|  Reaction-diffusion + level-set model of Zn-alloy             |\n";
 	cout<<"|  corrosion, coupled to ORR surface kinetics                   |\n";
 	cout<<"|                                                               |\n";
-	cout<<"|  v1.0                                                         |\n";
+	cout<<"|  v1.1.0                                                       |\n";
 	cout<<"+---------------------------------------------------------------+\n";
 	return 0;
 }
